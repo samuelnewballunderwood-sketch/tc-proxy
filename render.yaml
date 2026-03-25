@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tc-proxy
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: TC_API_KEY
+        sync: false
+      - key: TC_SECRET
+        sync: false
