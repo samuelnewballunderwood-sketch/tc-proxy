@@ -36,15 +36,32 @@ async function handleRequest(req, res) {
       console.log('Status:', r.status, 'Body:', raw.slice(0, 150));
       let data = JSON.parse(raw);
       if (!Array.isArray(data)) throw new Error(raw.slice(0, 300));
-      const bots = data.map(bot => ({
-        id:             bot.id,
-        name:           bot.name,
-        enabled:        bot.is_enabled,
-        pair:           bot.pairs?.[0] || bot.pair,
-        profit:         parseFloat(bot.total_profit_in_usd || 0),
-        activeDeals:    bot.active_deals_count  || 0,
-        completedDeals: bot.completed_deals_count || 0
-      }));
+      const bots = data.map(bot => {
+        const baseVol   = parseFloat(bot.base_order_volume   || 0);
+        const safetyVol = parseFloat(bot.safety_order_volume || 0);
+        const maxSafety = parseInt(bot.max_safety_orders     || 0);
+        const capital   = Math.round(baseVol + (safetyVol * maxSafety));
+        const name      = (bot.name || '').toLowerCase();
+        const strategy  = (bot.strategy || '').toLowerCase();
+        const direction = (strategy === 'short' || name.includes('short') || name.includes('hedge')) ? 'short' : 'long';
+        const pairs     = bot.pairs?.[0] || bot.pair || '';
+        const isSpot    = !name.includes('futures') && !name.includes('perp');
+        return {
+          id:               bot.id,
+          name:             bot.name,
+          enabled:          bot.is_enabled,
+          pair:             pairs,
+          profit:           parseFloat(bot.total_profit_in_usd || 0),
+          activeDeals:      bot.active_deals_count    || 0,
+          completedDeals:   bot.completed_deals_count || 0,
+          capital:          capital || null,
+          direction,
+          marketType:       isSpot ? 'spot' : 'futures',
+          baseOrderVolume:  baseVol,
+          safetyOrderVolume:safetyVol,
+          maxSafetyOrders:  maxSafety,
+        };
+      });
       res.end(JSON.stringify({ bots, totalProfit: bots.reduce((s,b) => s + b.profit, 0) }));
     } catch(e) {
       console.error('Error:', e.message);
