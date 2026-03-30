@@ -33,7 +33,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /binance/algo-spot — spot grid/DCA bot positions ───────────────────
+  // ── GET /binance/algo-spot — algo spot orders ─────────────────────────────
   if (req.method === 'GET' && req.url === '/binance/algo-spot') {
     try {
       const ts  = Date.now();
@@ -44,7 +44,41 @@ async function handleRequest(req, res) {
         { headers: { 'X-MBX-APIKEY': BN_KEY } }
       );
       const data = await r.json();
-      console.log('Algo spot status:', r.status, JSON.stringify(data).slice(0,150));
+      res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /binance/grid-spot — spot grid bot open orders ────────────────────
+  if (req.method === 'GET' && req.url === '/binance/grid-spot') {
+    try {
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      // Try v2 first, fall back to v1
+      const r = await fetch(
+        `https://api.binance.com/sapi/v2/grid/spot/getOpenOrders?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': BN_KEY } }
+      );
+      const data = await r.json();
+      console.log('Grid spot status:', r.status, JSON.stringify(data).slice(0,200));
+      res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /binance/grid-futures — futures grid bot open orders ──────────────
+  if (req.method === 'GET' && req.url === '/binance/grid-futures') {
+    try {
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(
+        `https://api.binance.com/sapi/v2/grid/futures/getOpenOrders?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': BN_KEY } }
+      );
+      const data = await r.json();
+      console.log('Grid futures status:', r.status, JSON.stringify(data).slice(0,200));
       res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
