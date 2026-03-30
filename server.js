@@ -1,11 +1,10 @@
 const crypto = require('crypto');
-const http = require('http');
-const PORT = process.env.PORT || 3000;
+const http   = require('http');
+const PORT   = process.env.PORT || 3000;
 
 function hmacSign(secret, message) {
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
-
 function readBody(req) {
   return new Promise((resolve) => {
     let body = '';
@@ -17,29 +16,88 @@ function readBody(req) {
 async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
-
   if (req.method === 'OPTIONS') { res.end('{}'); return; }
 
-  const TC_KEY    = process.env.TC_API_KEY;
-  const TC_SECRET = process.env.TC_SECRET;
+  const TC_KEY      = process.env.TC_API_KEY;
+  const TC_SECRET   = process.env.TC_SECRET;
+  const BN_KEY      = process.env.BINANCE_API_KEY;
+  const BN_SECRET   = process.env.BINANCE_SECRET;
 
-  // ── GET /bots — list all bots ──────────────────────────────────────────────
+  // ── GET /my-ip — returns this server's outbound IPv4 ──────────────────────
+  if (req.method === 'GET' && req.url === '/my-ip') {
+    try {
+      const r = await fetch('https://api.ipify.org?format=json');
+      const d = await r.json();
+      res.end(JSON.stringify({ ip: d.ip, note: 'Render proxy outbound IPv4' }));
+    } catch(e) { res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /binance/algo-spot — spot grid/DCA bot positions ───────────────────
+  if (req.method === 'GET' && req.url === '/binance/algo-spot') {
+    try {
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(
+        `https://api.binance.com/sapi/v1/algo/spot/openOrders?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': BN_KEY } }
+      );
+      const data = await r.json();
+      console.log('Algo spot status:', r.status, JSON.stringify(data).slice(0,150));
+      res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /binance/algo-futures — futures grid bot positions ─────────────────
+  if (req.method === 'GET' && req.url === '/binance/algo-futures') {
+    try {
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(
+        `https://api.binance.com/sapi/v1/algo/futures/openOrders?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': BN_KEY } }
+      );
+      const data = await r.json();
+      console.log('Algo futures status:', r.status, JSON.stringify(data).slice(0,150));
+      res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /binance/spot-bots — full spot grid bot details ────────────────────
+  if (req.method === 'GET' && req.url === '/binance/spot-bots') {
+    try {
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(
+        `https://api.binance.com/sapi/v2/algo/spot/openOrders?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': BN_KEY } }
+      );
+      const data = await r.json();
+      res.end(JSON.stringify({ ok: r.status === 200, status: r.status, data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /bots — list all 3Commas bots ────────────────────────────────────
   if (req.method === 'GET' && req.url.startsWith('/bots')) {
     try {
       const path = '/public/api/ver1/bots?limit=50&sort_by=created_at&sort_direction=desc';
       const sig  = hmacSign(TC_SECRET, path);
-      console.log('Key prefix:', TC_KEY ? TC_KEY.slice(0,8) : 'MISSING');
       const r    = await fetch('https://api.3commas.io' + path, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
       });
       const raw  = await r.text();
-      console.log('Status:', r.status, 'Body:', raw.slice(0, 150));
-      let data = JSON.parse(raw);
+      let data   = JSON.parse(raw);
       if (!Array.isArray(data)) throw new Error(raw.slice(0, 300));
       const bots = data.map(bot => {
-        const baseVol   = parseFloat(bot.base_order_volume   || 0);
+        const baseVol   = parseFloat(bot.base_order_volume || 0);
         const safetyVol = parseFloat(bot.safety_order_volume || 0);
-        const maxSafety = parseInt(bot.max_safety_orders     || 0);
+        const maxSafety = parseInt(bot.max_safety_orders || 0);
         const capital   = Math.round(baseVol + (safetyVol * maxSafety));
         const name      = (bot.name || '').toLowerCase();
         const strategy  = (bot.strategy || '').toLowerCase();
@@ -47,79 +105,60 @@ async function handleRequest(req, res) {
         const pairs     = bot.pairs?.[0] || bot.pair || '';
         const isSpot    = !name.includes('futures') && !name.includes('perp');
         return {
-          id:               bot.id,
-          name:             bot.name,
-          enabled:          bot.is_enabled,
-          pair:             pairs,
-          profit:           parseFloat(bot.total_profit_in_usd || 0),
-          activeDeals:      bot.active_deals_count    || 0,
-          completedDeals:   bot.completed_deals_count || 0,
-          capital:          capital || null,
-          direction,
-          marketType:       isSpot ? 'spot' : 'futures',
-          baseOrderVolume:  baseVol,
-          safetyOrderVolume:safetyVol,
-          maxSafetyOrders:  maxSafety,
+          id: bot.id, name: bot.name, enabled: bot.is_enabled,
+          pair: pairs,
+          profit: parseFloat(bot.total_profit_in_usd || 0),
+          uprofit: parseFloat(bot.unrealized_profit_in_usd || bot.unrealized_profit || 0),
+          activeDeals: bot.active_deals_count || 0,
+          completedDeals: bot.completed_deals_count || 0,
+          capital: capital || null, direction,
+          marketType: isSpot ? 'spot' : 'futures',
+          baseOrderVolume: baseVol, safetyOrderVolume: safetyVol, maxSafetyOrders: maxSafety,
+          strategy: strategy || 'dca',
         };
       });
       res.end(JSON.stringify({ bots, totalProfit: bots.reduce((s,b) => s + b.profit, 0) }));
-    } catch(e) {
-      console.error('Error:', e.message);
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: e.message }));
-    }
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
-  // ── POST /bot/:id/enable ───────────────────────────────────────────────────
+  // ── POST /bot/:id/enable ──────────────────────────────────────────────────
   if (req.method === 'POST' && /^\/bot\/\d+\/enable$/.test(req.url)) {
     const botId = req.url.split('/')[2];
     try {
       const path = `/ver1/bots/${botId}/enable`;
       const sig  = hmacSign(TC_SECRET, path);
       const r    = await fetch('https://api.3commas.io/public/api' + path, {
-        method: 'POST',
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
+        method: 'POST', headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
       });
       const raw  = await r.text();
-      console.log('Enable bot', botId, 'status:', r.status);
       if (r.status !== 200) throw new Error('3Commas error: ' + raw.slice(0,200));
       const data = JSON.parse(raw);
       res.end(JSON.stringify({ success: true, botId: parseInt(botId), enabled: data.is_enabled, name: data.name }));
-    } catch(e) {
-      console.error('Enable error:', e.message);
-      res.statusCode = 500;
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
     return;
   }
 
-  // ── POST /bot/:id/disable ──────────────────────────────────────────────────
+  // ── POST /bot/:id/disable ─────────────────────────────────────────────────
   if (req.method === 'POST' && /^\/bot\/\d+\/disable$/.test(req.url)) {
     const botId = req.url.split('/')[2];
     try {
       const path = `/ver1/bots/${botId}/disable`;
       const sig  = hmacSign(TC_SECRET, path);
       const r    = await fetch('https://api.3commas.io/public/api' + path, {
-        method: 'POST',
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
+        method: 'POST', headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
       });
       const raw  = await r.text();
-      console.log('Disable bot', botId, 'status:', r.status);
       if (r.status !== 200) throw new Error('3Commas error: ' + raw.slice(0,200));
       const data = JSON.parse(raw);
       res.end(JSON.stringify({ success: true, botId: parseInt(botId), enabled: data.is_enabled, name: data.name }));
-    } catch(e) {
-      console.error('Disable error:', e.message);
-      res.statusCode = 500;
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
     return;
   }
 
-  // ── 404 ───────────────────────────────────────────────────────────────────
+  // ── 404 ──────────────────────────────────────────────────────────────────
   res.statusCode = 404;
-  res.end(JSON.stringify({ error: 'Not found. Available: GET /bots, POST /bot/:id/enable, POST /bot/:id/disable' }));
+  res.end(JSON.stringify({ error: 'Not found. Available: GET /bots, GET /my-ip, GET /binance/algo-spot, GET /binance/algo-futures, POST /bot/:id/enable|disable' }));
 }
 
 http.createServer(handleRequest).listen(PORT, () => console.log('TC Proxy running on port', PORT));
