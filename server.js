@@ -194,9 +194,9 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && /^\/bot\/\d+\/deals$/.test(req.url)) {
     const botId = req.url.split('/')[2];
     try {
-      const path = `/ver1/deals?bot_id=${botId}&limit=500&order=created_at&order_direction=desc`;
+      const path = `/public/api/ver1/deals?bot_id=${botId}&limit=500&order=created_at&order_direction=desc`;
       const sig  = hmacSign(TC_SECRET, path);
-      const r    = await fetch('https://api.3commas.io/public/api' + path, {
+      const r    = await fetch('https://api.3commas.io' + path, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
       });
       const raw  = await r.text();
@@ -213,9 +213,9 @@ async function handleRequest(req, res) {
   // ── GET /deals/summary — trade totals across all bots ─────────────────────
   if (req.method === 'GET' && req.url === '/deals/summary') {
     try {
-      const path = `/ver1/deals?limit=500&order=created_at&order_direction=desc`;
+      const path = `/public/api/ver1/deals?limit=500&order=created_at&order_direction=desc`;
       const sig  = hmacSign(TC_SECRET, path);
-      const r    = await fetch('https://api.3commas.io/public/api' + path, {
+      const r    = await fetch('https://api.3commas.io' + path, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
       });
       const raw  = await r.text();
