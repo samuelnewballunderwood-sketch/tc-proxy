@@ -190,9 +190,55 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /bot/:id/deals — full deal history for a 3Commas bot ─────────────
+  if (req.method === 'GET' && /^\/bot\/\d+\/deals$/.test(req.url)) {
+    const botId = req.url.split('/')[2];
+    try {
+      const path = `/ver1/deals?bot_id=${botId}&limit=500&order=created_at&order_direction=desc`;
+      const sig  = hmacSign(TC_SECRET, path);
+      const r    = await fetch('https://api.3commas.io/public/api' + path, {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
+      });
+      const raw  = await r.text();
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data)) throw new Error(raw.slice(0,300));
+      const totalTrades   = data.reduce((s, d) => s + (parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + (d.status === 'completed' ? 1 : 0)), 0);
+      const completedDeals = data.filter(d => d.status === 'completed').length;
+      const totalProfit    = data.reduce((s, d) => s + parseFloat(d.actual_profit_in_usd || 0), 0);
+      res.end(JSON.stringify({ botId: parseInt(botId), totalDeals: data.length, completedDeals, totalTrades, totalProfit: Math.round(totalProfit * 100) / 100 }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /deals/summary — trade totals across all bots ─────────────────────
+  if (req.method === 'GET' && req.url === '/deals/summary') {
+    try {
+      const path = `/ver1/deals?limit=500&order=created_at&order_direction=desc`;
+      const sig  = hmacSign(TC_SECRET, path);
+      const r    = await fetch('https://api.3commas.io/public/api' + path, {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' }
+      });
+      const raw  = await r.text();
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data)) throw new Error(raw.slice(0,300));
+      const completedDeals = data.filter(d => d.status === 'completed').length;
+      const activeDeals    = data.filter(d => d.status === 'active').length;
+      const totalProfit    = data.reduce((s, d) => s + parseFloat(d.actual_profit_in_usd || 0), 0);
+      // Count actual buy/sell executions across all deals
+      const totalOrders    = data.reduce((s, d) => {
+        return s + (parseInt(d.completed_manual_safety_orders_count || 0))
+                 + (parseInt(d.completed_safety_orders_count || 0))
+                 + (parseInt(d.current_active_safety_orders_count || 0))
+                 + (d.status === 'completed' || d.bought_volume > 0 ? 1 : 0);
+      }, 0);
+      res.end(JSON.stringify({ completedDeals, activeDeals, totalOrders, totalProfit: Math.round(totalProfit * 100) / 100, dealCount: data.length }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
   // ── 404 ──────────────────────────────────────────────────────────────────
   res.statusCode = 404;
-  res.end(JSON.stringify({ error: 'Not found. Available: GET /bots, GET /my-ip, GET /binance/algo-spot, GET /binance/algo-futures, POST /bot/:id/enable|disable' }));
+  res.end(JSON.stringify({ error: 'Not found.' }));
 }
 
 http.createServer(handleRequest).listen(PORT, () => console.log('TC Proxy running on port', PORT));
