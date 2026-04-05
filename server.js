@@ -50,9 +50,9 @@ async function handleRequest(req, res) {
       const [fgRes, dominanceRes, fundingRes, pricesRes, klinesRes] = await Promise.allSettled([
         fetch('https://api.alternative.me/fng/?limit=2').then(r => r.json()),
         fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()),
-        fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT').then(r => r.json()),
+        fetch('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1').then(r => r.json()),
         // Live prices + 24h change for all bot pairs
-        fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","BNBUSDT"]').then(r => r.json()),
+        fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=%5B%22BTCUSDT%22%2C%22ETHUSDT%22%2C%22SOLUSDT%22%2C%22XRPUSDT%22%2C%22BNBUSDT%22%5D').then(r => r.json()),
         // BTC 4H candles for RSI calculation (last 20 candles)
         fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=20').then(r => r.json()),
       ]);
@@ -60,8 +60,10 @@ async function handleRequest(req, res) {
       const fg = fgRes.status === 'fulfilled' ? fgRes.value?.data?.[0] : null;
       const dom = dominanceRes.status === 'fulfilled'
         ? dominanceRes.value?.data?.market_cap_percentage?.btc : null;
-      const funding = fundingRes.status === 'fulfilled'
-        ? parseFloat(fundingRes.value?.lastFundingRate || 0) * 100 : null;
+      const funding = fundingRes.status === 'fulfilled' && Array.isArray(fundingRes.value) && fundingRes.value[0]
+        ? parseFloat(fundingRes.value[0].fundingRate || 0) * 100
+        : fundingRes.status === 'fulfilled' && fundingRes.value?.lastFundingRate
+        ? parseFloat(fundingRes.value.lastFundingRate || 0) * 100 : null;
 
       // Parse live prices
       const priceData = {};
