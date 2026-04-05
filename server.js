@@ -43,28 +43,69 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /market-signals — Fear & Greed, BTC dominance, funding rate ───────
+  // ── GET /market-signals — full market picture for Hannah's brain ──────────
   if (req.method === 'GET' && req.url === '/market-signals') {
     try {
-      const [fgRes, dominanceRes, fundingRes] = await Promise.allSettled([
+      // Fetch everything in parallel
+      const [fgRes, dominanceRes, fundingRes, pricesRes, klinesRes] = await Promise.allSettled([
         fetch('https://api.alternative.me/fng/?limit=2').then(r => r.json()),
         fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()),
         fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT').then(r => r.json()),
+        // Live prices + 24h change for all bot pairs
+        fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","BNBUSDT"]').then(r => r.json()),
+        // BTC 4H candles for RSI calculation (last 20 candles)
+        fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=20').then(r => r.json()),
       ]);
+
       const fg = fgRes.status === 'fulfilled' ? fgRes.value?.data?.[0] : null;
       const dom = dominanceRes.status === 'fulfilled'
         ? dominanceRes.value?.data?.market_cap_percentage?.btc : null;
       const funding = fundingRes.status === 'fulfilled'
         ? parseFloat(fundingRes.value?.lastFundingRate || 0) * 100 : null;
+
+      // Parse live prices
+      const priceData = {};
+      if (pricesRes.status === 'fulfilled' && Array.isArray(pricesRes.value)) {
+        pricesRes.value.forEach(t => {
+          priceData[t.symbol] = {
+            price: parseFloat(parseFloat(t.lastPrice).toFixed(2)),
+            change24h: parseFloat(parseFloat(t.priceChangePercent).toFixed(2)),
+            volume24h: parseFloat(parseFloat(t.quoteVolume).toFixed(0)),
+            high24h: parseFloat(parseFloat(t.highPrice).toFixed(2)),
+            low24h: parseFloat(parseFloat(t.lowPrice).toFixed(2)),
+          };
+        });
+      }
+
+      // Calculate RSI(14) from 4H BTC candles
+      let btcRsi = null;
+      if (klinesRes.status === 'fulfilled' && Array.isArray(klinesRes.value) && klinesRes.value.length >= 15) {
+        const closes = klinesRes.value.map(k => parseFloat(k[4]));
+        const gains = [], losses = [];
+        for (let i = 1; i < closes.length; i++) {
+          const diff = closes[i] - closes[i-1];
+          gains.push(diff > 0 ? diff : 0);
+          losses.push(diff < 0 ? Math.abs(diff) : 0);
+        }
+        const period = 14;
+        const avgGain = gains.slice(-period).reduce((a,b) => a+b, 0) / period;
+        const avgLoss = losses.slice(-period).reduce((a,b) => a+b, 0) / period;
+        if (avgLoss === 0) { btcRsi = 100; }
+        else { const rs = avgGain / avgLoss; btcRsi = parseFloat((100 - (100 / (1 + rs))).toFixed(1)); }
+      }
+
+      const fgValue = fg ? parseInt(fg.value) : null;
       res.end(JSON.stringify({
         fearGreed: {
-          value: fg ? parseInt(fg.value) : null,
+          value: fgValue,
           classification: fg?.value_classification || null,
           timestamp: fg?.timestamp || null,
         },
         btcDominance: dom ? parseFloat(dom.toFixed(2)) : null,
         btcFundingRate: funding ? parseFloat(funding.toFixed(4)) : null,
-        regime: deriveRegime(fg ? parseInt(fg.value) : null),
+        btcRsi4h: btcRsi,
+        prices: priceData,
+        regime: deriveRegime(fgValue),
         timestamp: Date.now(),
       }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
