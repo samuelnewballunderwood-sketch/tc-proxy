@@ -77,7 +77,7 @@ async function handleRequest(req, res) {
   // Frankfurt calls itself (localhost equivalent via self-reference) — works either way
   if (req.method === 'GET' && req.url === '/market-signals') {
     try {
-      const self = `http://localhost:${PORT}`;
+      const self = 'https://tc-proxy-eu.onrender.com';
       const [fgRes, dominanceRes, pricesRes, klinesRes, fundingRes] = await Promise.allSettled([
         fetch('https://api.alternative.me/fng/?limit=2').then(r => r.json()),
         fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()),
