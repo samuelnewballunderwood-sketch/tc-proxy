@@ -160,15 +160,17 @@ async function handleRequest(req, res) {
   // ── GET /bots  (3Commas) ────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/bots') {
     try {
-      const path = '/ver1/bots?limit=100&scope=enabled';
-      const sig  = hmacSign(TC_SECRET, path);
-      const r    = await fetch('https://api.3commas.io' + path, {
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig }
+      const qs   = 'limit=100';
+      const path = '/ver1/bots';
+      // 3Commas v1: sign path only (no query string)
+      const sig  = hmacSign(TC_SECRET, path + '?' + qs);
+      const r    = await fetch('https://api.3commas.io' + path + '?' + qs, {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
       });
       const raw  = await r.text();
       let data;
-      try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas parse error: ' + raw.slice(0,200)); }
-      if (data.error) throw new Error(JSON.stringify(data.error));
+      try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas HTTP ' + r.status + ' parse error: [' + raw.slice(0,400) + ']'); }
+      if (!Array.isArray(data) && data.error) throw new Error('3Commas error HTTP ' + r.status + ': ' + JSON.stringify(data.error));
       const bots = (Array.isArray(data) ? data : []).map(b => ({
         id:            b.id,
         name:          b.name,
@@ -198,7 +200,7 @@ async function handleRequest(req, res) {
       }
       const endpoint = action === 'enable' ? 'enable' : 'disable';
       const path     = `/ver1/bots/${botId}/${endpoint}`;
-      const sig      = hmacSign(TC_SECRET, path);
+      const sig      = hmacSign(TC_SECRET, path + '');
       const r        = await fetch(`https://api.3commas.io${path}`, {
         method: 'POST',
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
