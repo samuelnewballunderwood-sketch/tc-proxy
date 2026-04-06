@@ -160,17 +160,16 @@ async function handleRequest(req, res) {
   // ── GET /bots  (3Commas) ────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/bots') {
     try {
-      const ts  = Math.floor(Date.now() / 1000);
-      const sig = hmacSign(TC_SECRET, `GET\n/ver1/bots\n`);
-      const r   = await fetch('https://api.3commas.io/ver1/bots?limit=100&scope=enabled', {
-        headers: {
-          'APIKEY':    TC_KEY,
-          'Signature': sig,
-        }
+      const path = '/ver1/bots?limit=100&scope=enabled';
+      const sig  = hmacSign(TC_SECRET, path);
+      const r    = await fetch('https://api.3commas.io' + path, {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig }
       });
-      const data = await r.json();
+      const raw  = await r.text();
+      let data;
+      try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas parse error: ' + raw.slice(0,200)); }
       if (data.error) throw new Error(JSON.stringify(data.error));
-      const bots = data.map(b => ({
+      const bots = (Array.isArray(data) ? data : []).map(b => ({
         id:            b.id,
         name:          b.name,
         pair:          b.pairs?.[0] || b.pair,
@@ -199,7 +198,7 @@ async function handleRequest(req, res) {
       }
       const endpoint = action === 'enable' ? 'enable' : 'disable';
       const path     = `/ver1/bots/${botId}/${endpoint}`;
-      const sig      = hmacSign(TC_SECRET, `POST\n${path}\n`);
+      const sig      = hmacSign(TC_SECRET, path);
       const r        = await fetch(`https://api.3commas.io${path}`, {
         method: 'POST',
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
@@ -214,8 +213,9 @@ async function handleRequest(req, res) {
   // ── GET /deals/summary ──────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
-      const sig = hmacSign(TC_SECRET, `GET\n/ver1/deals\n`);
-      const r   = await fetch('https://api.3commas.io/ver1/deals?limit=1000&scope=completed', {
+      const dealsPath = '/ver1/deals?limit=1000&scope=completed';
+      const sig = hmacSign(TC_SECRET, dealsPath);
+      const r   = await fetch('https://api.3commas.io' + dealsPath, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig }
       });
       const data = await r.json();
