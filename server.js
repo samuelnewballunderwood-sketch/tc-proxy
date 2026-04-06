@@ -167,6 +167,11 @@ async function handleRequest(req, res) {
       const r    = await fetch('https://api.3commas.io' + path + '?' + qs, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
       });
+      // 204 = valid empty response (no bots match query)
+      if (r.status === 204) {
+        res.end(JSON.stringify({ bots: [], total: 0 }));
+        return;
+      }
       const raw  = await r.text();
       let data;
       try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas HTTP ' + r.status + ' parse error: [' + raw.slice(0,400) + ']'); }
@@ -220,6 +225,10 @@ async function handleRequest(req, res) {
       const r   = await fetch('https://api.3commas.io' + dealsPath, {
         headers: { 'APIKEY': TC_KEY, 'Signature': sig }
       });
+      if (r.status === 204) {
+        res.end(JSON.stringify({ completedDeals: 0, activeDeals: 0, totalOrders: 0, totalProfit: 0 }));
+        return;
+      }
       const data = await r.json();
       if (data.error) throw new Error(JSON.stringify(data.error));
       const deals        = Array.isArray(data) ? data : [];
