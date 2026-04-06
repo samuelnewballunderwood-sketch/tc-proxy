@@ -1,21 +1,23 @@
 const crypto = require('crypto');
-const http = require('http');
-const PORT = process.env.PORT || 3000;
+const http   = require('http');
+const PORT   = process.env.PORT || 3000;
 
 function hmacSign(secret, message) {
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
+
 function readBody(req) {
   return new Promise((resolve) => {
     let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => resolve(body));
   });
 }
+
 function deriveRegime(fg) {
   if (fg === null) return 'UNKNOWN';
-  if (fg <= 25) return 'EXTREME_FEAR';
-  if (fg <= 45) return 'FEAR';
-  if (fg <= 55) return 'NEUTRAL';
-  if (fg <= 75) return 'GREED';
+  if (fg <= 25)   return 'EXTREME_FEAR';
+  if (fg <= 45)   return 'FEAR';
+  if (fg <= 55)   return 'NEUTRAL';
+  if (fg <= 75)   return 'GREED';
   return 'EXTREME_GREED';
 }
 
@@ -29,7 +31,9 @@ async function handleRequest(req, res) {
   const BN_KEY    = process.env.BINANCE_API_KEY;
   const BN_SECRET = process.env.BINANCE_SECRET;
 
-  // ── GET /my-ip ──────────────────────────────────────────────────────────
+  const url = req.url.split('?')[0];
+
+  // ── GET /my-ip ──────────────────────────────────────────────────────────────
   if (req.method === 'GET' && req.url === '/my-ip') {
     try {
       const r = await fetch('https://api.ipify.org?format=json');
@@ -39,244 +43,218 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /binance/prices — live 24hr ticker (PUBLIC, no auth) ────────────
-  if (req.method === 'GET' && req.url === '/binance/prices') {
+  // ── GET /spot-wallet ────────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/spot-wallet') {
     try {
-      const r = await fetch(
-        'https://api.binance.com/api/v3/ticker/24hr?symbols=%5B%22BTCUSDT%22%2C%22ETHUSDT%22%2C%22SOLUSDT%22%2C%22XRPUSDT%22%2C%22BNBUSDT%22%5D'
-      );
-      res.end(JSON.stringify(await r.json()));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
-    return;
-  }
-
-  // ── GET /binance/klines — BTC 4H candles for RSI (PUBLIC, no auth) ──────
-  if (req.method === 'GET' && req.url === '/binance/klines') {
-    try {
-      const r = await fetch(
-        'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=20'
-      );
-      res.end(JSON.stringify(await r.json()));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
-    return;
-  }
-
-  // ── GET /binance/funding — BTC futures funding rate (PUBLIC, no auth) ───
-  if (req.method === 'GET' && req.url === '/binance/funding') {
-    try {
-      const r = await fetch(
-        'https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1'
-      );
-      res.end(JSON.stringify(await r.json()));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
-    return;
-  }
-
-  // ── GET /market-signals — full market picture for Hannah's brain ─────────
-  // Oregon calls Frankfurt for prices/klines/funding to avoid geo-blocks
-  // Frankfurt calls itself (localhost equivalent via self-reference) — works either way
-  if (req.method === 'GET' && req.url === '/market-signals') {
-    try {
-      const self = 'https://tc-proxy-eu.onrender.com';
-      const [fgRes, dominanceRes, pricesRes, klinesRes, fundingRes] = await Promise.allSettled([
-        fetch('https://api.alternative.me/fng/?limit=2').then(r => r.json()),
-        fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()),
-        fetch(self + '/binance/prices').then(r => r.json()),
-        fetch(self + '/binance/klines').then(r => r.json()),
-        fetch(self + '/binance/funding').then(r => r.json()),
-      ]);
-
-      const fg  = fgRes.status === 'fulfilled' ? fgRes.value?.data?.[0] : null;
-      const dom = dominanceRes.status === 'fulfilled'
-        ? dominanceRes.value?.data?.market_cap_percentage?.btc : null;
-
-      // Parse prices
-      const priceData = {};
-      if (pricesRes.status === 'fulfilled') {
-        const arr = Array.isArray(pricesRes.value) ? pricesRes.value
-          : Array.isArray(pricesRes.value?.data) ? pricesRes.value.data : [];
-        arr.forEach(t => {
-          if (!t.symbol) return;
-          priceData[t.symbol] = {
-            price:     parseFloat(parseFloat(t.lastPrice).toFixed(2)),
-            change24h: parseFloat(parseFloat(t.priceChangePercent).toFixed(2)),
-            volume24h: parseFloat(parseFloat(t.quoteVolume).toFixed(0)),
-            high24h:   parseFloat(parseFloat(t.highPrice).toFixed(2)),
-            low24h:    parseFloat(parseFloat(t.lowPrice).toFixed(2)),
-          };
-        });
-      }
-
-      // RSI(14) from 4H closes
-      let btcRsi = null;
-      if (klinesRes.status === 'fulfilled' && klinesRes.value) {
-        const klines = Array.isArray(klinesRes.value) ? klinesRes.value
-          : Array.isArray(klinesRes.value?.data) ? klinesRes.value.data : [];
-        if (klines.length >= 15) {
-          const closes = klines.map(k => parseFloat(k[4]));
-          const gains = [], losses = [];
-          for (let i = 1; i < closes.length; i++) {
-            const diff = closes[i] - closes[i-1];
-            gains.push(diff > 0 ? diff : 0);
-            losses.push(diff < 0 ? Math.abs(diff) : 0);
-          }
-          const period = 14;
-          const avgGain = gains.slice(-period).reduce((a,b)=>a+b,0) / period;
-          const avgLoss = losses.slice(-period).reduce((a,b)=>a+b,0) / period;
-          btcRsi = avgLoss === 0 ? 100
-            : parseFloat((100-(100/(1+(avgGain/avgLoss)))).toFixed(1));
-        }
-      }
-
-      // Funding rate
-      let funding = null;
-      if (fundingRes.status === 'fulfilled' && fundingRes.value) {
-        const fv = fundingRes.value;
-        const rate = Array.isArray(fv) ? fv[0]?.fundingRate
-          : fv?.fundingRate || fv?.lastFundingRate;
-        if (rate != null) funding = parseFloat((parseFloat(rate)*100).toFixed(4));
-      }
-
-      const fgValue = fg ? parseInt(fg.value) : null;
-      res.end(JSON.stringify({
-        fearGreed: { value: fgValue, classification: fg?.value_classification||null, timestamp: fg?.timestamp||null },
-        btcDominance: dom ? parseFloat(dom.toFixed(2)) : null,
-        btcFundingRate: funding,
-        btcRsi4h: btcRsi,
-        prices: priceData,
-        regime: deriveRegime(fgValue),
-        timestamp: Date.now(),
-      }));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
-    return;
-  }
-
-  // ── GET /binance/algo-spot ──────────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/binance/algo-spot') {
-    try {
-      const ts=Date.now(), q=`timestamp=${ts}&recvWindow=10000`, sig=hmacSign(BN_SECRET,q);
-      const r = await fetch(`https://api.binance.com/sapi/v1/algo/spot/openOrders?${q}&signature=${sig}`,{headers:{'X-MBX-APIKEY':BN_KEY}});
-      res.end(JSON.stringify({ok:r.status===200,status:r.status,data:await r.json()}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-    return;
-  }
-
-  // ── GET /binance/grid-spot ──────────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/binance/grid-spot') {
-    try {
-      const ts=Date.now(), q=`timestamp=${ts}&recvWindow=10000`, sig=hmacSign(BN_SECRET,q);
-      const r = await fetch(`https://api.binance.com/sapi/v2/grid/spot/getOpenOrders?${q}&signature=${sig}`,{headers:{'X-MBX-APIKEY':BN_KEY}});
-      res.end(JSON.stringify({ok:r.status===200,status:r.status,data:await r.json()}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-    return;
-  }
-
-  // ── GET /binance/grid-futures ───────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/binance/grid-futures') {
-    try {
-      const ts=Date.now(), q=`timestamp=${ts}&recvWindow=10000`, sig=hmacSign(BN_SECRET,q);
-      const r = await fetch(`https://api.binance.com/sapi/v2/grid/futures/getOpenOrders?${q}&signature=${sig}`,{headers:{'X-MBX-APIKEY':BN_KEY}});
-      res.end(JSON.stringify({ok:r.status===200,status:r.status,data:await r.json()}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-    return;
-  }
-
-  // ── GET /binance/algo-futures ───────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/binance/algo-futures') {
-    try {
-      const ts=Date.now(), q=`timestamp=${ts}&recvWindow=10000`, sig=hmacSign(BN_SECRET,q);
-      const r = await fetch(`https://api.binance.com/sapi/v1/algo/futures/openOrders?${q}&signature=${sig}`,{headers:{'X-MBX-APIKEY':BN_KEY}});
-      res.end(JSON.stringify({ok:r.status===200,status:r.status,data:await r.json()}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-    return;
-  }
-
-  // ── GET /binance/spot-bots ──────────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/binance/spot-bots') {
-    try {
-      const ts=Date.now(), q=`timestamp=${ts}&recvWindow=10000`, sig=hmacSign(BN_SECRET,q);
-      const r = await fetch(`https://api.binance.com/sapi/v2/algo/spot/openOrders?${q}&signature=${sig}`,{headers:{'X-MBX-APIKEY':BN_KEY}});
-      res.end(JSON.stringify({ok:r.status===200,status:r.status,data:await r.json()}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-    return;
-  }
-
-  // ── GET /bots — 3Commas bot list ────────────────────────────────────────
-  if (req.method === 'GET' && req.url.startsWith('/bots')) {
-    try {
-      const path='/public/api/ver1/bots?limit=50&sort_by=created_at&sort_direction=desc';
-      const sig=hmacSign(TC_SECRET,path);
-      const r = await fetch('https://api.3commas.io'+path,{headers:{'APIKEY':TC_KEY,'Signature':sig,'Content-Type':'application/json','Accept':'application/json'}});
-      const raw=await r.text(); let data=JSON.parse(raw);
-      if(!Array.isArray(data)) throw new Error(raw.slice(0,300));
-      const bots=data.map(bot=>{
-        const baseVol=parseFloat(bot.base_order_volume||0),safetyVol=parseFloat(bot.safety_order_volume||0),maxSafety=parseInt(bot.max_safety_orders||0);
-        const capital=Math.round(baseVol+(safetyVol*maxSafety));
-        const name=(bot.name||'').toLowerCase(),strategy=(bot.strategy||'').toLowerCase();
-        const direction=(strategy==='short'||name.includes('short')||name.includes('hedge'))?'short':'long';
-        const pairs=bot.pairs?.[0]||bot.pair||'';
-        const isSpot=!name.includes('futures')&&!name.includes('perp');
-        return{id:bot.id,name:bot.name,enabled:bot.is_enabled,pair:pairs,profit:parseFloat(bot.total_profit_in_usd||0),uprofit:parseFloat(bot.unrealized_profit_in_usd||0),activeDeals:bot.active_deals_count||0,completedDeals:bot.completed_deals_count||0,capital:capital||null,direction,marketType:isSpot?'spot':'futures',baseOrderVolume:baseVol,safetyOrderVolume:safetyVol,maxSafetyOrders:maxSafety,strategy:strategy||'dca'};
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(`https://api.binance.com/api/v3/account?${q}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
       });
-      res.end(JSON.stringify({bots,totalProfit:bots.reduce((s,b)=>s+b.profit,0)}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
+      const data = await r.json();
+      if (data.msg) throw new Error(data.msg);
+      const usdt    = data.balances.find(b => b.asset === 'USDT');
+      const usdtBal = usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : 0;
+      const nonZero = data.balances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
+      res.end(JSON.stringify({
+        usdtBalance: usdtBal,
+        assetCount:  nonZero.length,
+        balances:    nonZero.map(b => ({ asset: b.asset, free: parseFloat(b.free), locked: parseFloat(b.locked) }))
+      }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
-  // ── POST /bot/:id/enable ────────────────────────────────────────────────
-  if (req.method==='POST' && /^\/bot\/\d+\/enable$/.test(req.url)) {
-    const botId=req.url.split('/')[2];
+  // ── GET /futures-wallet ─────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/futures-wallet') {
     try {
-      const path=`/ver1/bots/${botId}/enable`,sig=hmacSign(TC_SECRET,path);
-      const r=await fetch('https://api.3commas.io/public/api'+path,{method:'POST',headers:{'APIKEY':TC_KEY,'Signature':sig,'Content-Type':'application/json','Accept':'application/json'}});
-      const raw=await r.text(); if(r.status!==200) throw new Error('3C: '+raw.slice(0,200));
-      const data=JSON.parse(raw);
-      res.end(JSON.stringify({success:true,botId:parseInt(botId),enabled:data.is_enabled,name:data.name}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({success:false,error:e.message}));}
+      const ts  = Date.now();
+      const q   = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r   = await fetch(`https://fapi.binance.com/fapi/v2/account?${q}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      if (data.msg) throw new Error(data.msg);
+      res.end(JSON.stringify({
+        marginBalance:    parseFloat(data.totalMarginBalance    || 0),
+        walletBalance:    parseFloat(data.totalWalletBalance    || 0),
+        unrealizedPnl:    parseFloat(data.totalUnrealizedProfit || 0),
+        availableBalance: parseFloat(data.availableBalance      || 0)
+      }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
-  // ── POST /bot/:id/disable ───────────────────────────────────────────────
-  if (req.method==='POST' && /^\/bot\/\d+\/disable$/.test(req.url)) {
-    const botId=req.url.split('/')[2];
+  // ── GET /prices ─────────────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/prices') {
     try {
-      const path=`/ver1/bots/${botId}/disable`,sig=hmacSign(TC_SECRET,path);
-      const r=await fetch('https://api.3commas.io/public/api'+path,{method:'POST',headers:{'APIKEY':TC_KEY,'Signature':sig,'Content-Type':'application/json','Accept':'application/json'}});
-      const raw=await r.text(); if(r.status!==200) throw new Error('3C: '+raw.slice(0,200));
-      const data=JSON.parse(raw);
-      res.end(JSON.stringify({success:true,botId:parseInt(botId),enabled:data.is_enabled,name:data.name}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({success:false,error:e.message}));}
+      const r    = await fetch('https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]');
+      const data = await r.json();
+      const out  = {};
+      data.forEach(p => out[p.symbol] = parseFloat(p.price));
+      res.end(JSON.stringify(out));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
-  // ── GET /bot/:id/deals ──────────────────────────────────────────────────
-  if (req.method==='GET' && /^\/bot\/\d+\/deals$/.test(req.url)) {
-    const botId=req.url.split('/')[2];
+  // ── GET /binance-bots ───────────────────────────────────────────────────────
+  // Returns trade counts per pair (used to score Binance native bots)
+  if (req.method === 'GET' && url === '/binance-bots') {
     try {
-      const path=`/public/api/ver1/deals?bot_id=${botId}&limit=500&order=created_at&order_direction=desc`,sig=hmacSign(TC_SECRET,path);
-      const r=await fetch('https://api.3commas.io'+path,{headers:{'APIKEY':TC_KEY,'Signature':sig,'Content-Type':'application/json','Accept':'application/json'}});
-      const data=JSON.parse(await r.text());
-      if(!Array.isArray(data)) throw new Error(JSON.stringify(data).slice(0,300));
-      res.end(JSON.stringify({botId:parseInt(botId),totalDeals:data.length,completedDeals:data.filter(d=>d.status==='completed').length,totalProfit:Math.round(data.reduce((s,d)=>s+parseFloat(d.actual_profit_in_usd||0),0)*100)/100}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
+      const ts = Date.now();
+      async function spotTrades(sym) {
+        const q   = `symbol=${sym}&limit=1000&timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r   = await fetch(`https://api.binance.com/api/v3/myTrades?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const d = await r.json();
+        return Array.isArray(d) ? d.length : 0;
+      }
+      async function futuresTrades(sym) {
+        const q   = `symbol=${sym}&limit=1000&timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r   = await fetch(`https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const d = await r.json();
+        return Array.isArray(d) ? d.length : 0;
+      }
+      async function get24h() {
+        const r = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","XRPUSDT","SOLUSDT","BNBUSDT"]');
+        const d = await r.json();
+        const c = {};
+        d.forEach(t => { c[t.symbol] = { change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume) }; });
+        return c;
+      }
+      const [eth, btc, bnb, sol, xrp, ethF, ch] = await Promise.all([
+        spotTrades('ETHUSDT'), spotTrades('BTCUSDT'), spotTrades('BNBUSDT'),
+        spotTrades('SOLUSDT'), spotTrades('XRPUSDT'), futuresTrades('ETHUSDT'), get24h()
+      ]);
+      const bots = [
+        { symbol:'ETHUSDT',         type:'spot-grid',    trades: eth,  id:'eth-grid-trades',     change24h: ch['ETHUSDT']?.change||0 },
+        { symbol:'BTCUSDT',         type:'spot-dca',     trades: btc,  id:'btc-dca-trades',      change24h: ch['BTCUSDT']?.change||0 },
+        { symbol:'BNBUSDT',         type:'spot-grid',    trades: bnb,  id:'bnb-grid-trades',     change24h: ch['BNBUSDT']?.change||0 },
+        { symbol:'SOLUSDT',         type:'spot-grid',    trades: sol,  id:'sol-grid-trades',     change24h: ch['SOLUSDT']?.change||0 },
+        { symbol:'XRPUSDT',         type:'spot-grid',    trades: xrp,  id:'xrp-grid-trades',     change24h: ch['XRPUSDT']?.change||0 },
+        { symbol:'ETHUSDT-FUTURES', type:'futures-grid', trades: ethF, id:'ethusdt-perp-trades', change24h: ch['ETHUSDT']?.change||0 },
+      ];
+      const btcCh = ch['BTCUSDT']?.change || 0;
+      const v     = Math.abs(btcCh);
+      res.end(JSON.stringify({
+        bots,
+        totalTrades: bots.reduce((s,b) => s + b.trades, 0),
+        market: {
+          regime:      btcCh > 2 ? 'Bull' : btcCh < -2 ? 'Bear' : 'Sideways',
+          volatility:  v > 4 ? 'High' : v > 1.5 ? 'Medium' : 'Low',
+          btcChange24h: btcCh,
+          changes:     ch
+        }
+      }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message, bots: [], totalTrades: 0 })); }
     return;
   }
 
-  // ── GET /deals/summary ──────────────────────────────────────────────────
-  if (req.method==='GET' && req.url==='/deals/summary') {
+  // ── GET /bots  (3Commas) ────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/bots') {
     try {
-      const path=`/public/api/ver1/deals?limit=500&order=created_at&order_direction=desc`,sig=hmacSign(TC_SECRET,path);
-      const r=await fetch('https://api.3commas.io'+path,{headers:{'APIKEY':TC_KEY,'Signature':sig,'Content-Type':'application/json','Accept':'application/json'}});
-      const data=JSON.parse(await r.text());
-      if(!Array.isArray(data)) throw new Error(JSON.stringify(data).slice(0,300));
-      res.end(JSON.stringify({completedDeals:data.filter(d=>d.status==='completed').length,activeDeals:data.filter(d=>d.status==='active').length,totalProfit:Math.round(data.reduce((s,d)=>s+parseFloat(d.actual_profit_in_usd||0),0)*100)/100,dealCount:data.length}));
-    } catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
+      const ts  = Math.floor(Date.now() / 1000);
+      const sig = hmacSign(TC_SECRET, `GET\n/ver1/bots\n`);
+      const r   = await fetch('https://api.3commas.io/ver1/bots?limit=100&scope=enabled', {
+        headers: {
+          'APIKEY':    TC_KEY,
+          'Signature': sig,
+        }
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      const bots = data.map(b => ({
+        id:            b.id,
+        name:          b.name,
+        pair:          b.pairs?.[0] || b.pair,
+        strategy:      b.strategy,
+        capital:       parseFloat(b.base_order_volume || 0),
+        profit:        parseFloat(b.completed_deals_usd_profit || 0),
+        completedDeals:parseInt(b.finished_deals_count || 0),
+        activeDeals:   parseInt(b.active_deals_count || 0),
+        direction:     b.strategy === 'short' ? 'short' : 'long',
+        marketType:    b.type === 'Bot::MultiBot' ? 'futures' : 'spot',
+        active:        b.is_enabled,
+      }));
+      res.end(JSON.stringify({ bots, total: bots.length }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
-  // ── 404 ────────────────────────────────────────────────────────────────
-  res.statusCode=404;
-  res.end(JSON.stringify({error:'Not found.'}));
+  // ── POST /bot/:id/enable|disable ────────────────────────────────────────────
+  if (req.method === 'POST' && url.startsWith('/bot/')) {
+    try {
+      const parts  = url.split('/');
+      const botId  = parts[2];
+      const action = parts[3];
+      if (!botId || !['enable','disable'].includes(action)) {
+        res.statusCode = 400; res.end(JSON.stringify({ error: 'Usage: POST /bot/:id/enable|disable' })); return;
+      }
+      const endpoint = action === 'enable' ? 'enable' : 'disable';
+      const path     = `/ver1/bots/${botId}/${endpoint}`;
+      const sig      = hmacSign(TC_SECRET, `POST\n${path}\n`);
+      const r        = await fetch(`https://api.3commas.io${path}`, {
+        method: 'POST',
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      res.end(JSON.stringify({ success: true, bot: data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
+    return;
+  }
+
+  // ── GET /deals/summary ──────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/deals/summary') {
+    try {
+      const sig = hmacSign(TC_SECRET, `GET\n/ver1/deals\n`);
+      const r   = await fetch('https://api.3commas.io/ver1/deals?limit=1000&scope=completed', {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig }
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      const deals        = Array.isArray(data) ? data : [];
+      const totalProfit  = deals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const totalOrders  = deals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
+      res.end(JSON.stringify({
+        completedDeals: deals.length,
+        activeDeals:    0,
+        totalOrders,
+        totalProfit:    Math.round(totalProfit * 100) / 100,
+      }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /market-signals ─────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/market-signals') {
+    try {
+      const [fgRes, domRes, fundRes] = await Promise.all([
+        fetch('https://api.alternative.me/fng/?limit=1').then(r => r.json()).catch(() => null),
+        fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()).catch(() => null),
+        fetch('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1').then(r => r.json()).catch(() => null),
+      ]);
+      const fg       = fgRes?.data?.[0] ? { value: parseInt(fgRes.data[0].value), label: fgRes.data[0].value_classification } : null;
+      const btcDom   = domRes?.data?.market_cap_percentage?.btc ? Math.round(domRes.data.market_cap_percentage.btc * 10) / 10 : null;
+      const funding  = fundRes?.[0] ? parseFloat(fundRes[0].fundingRate) * 100 : null;
+      const regime   = deriveRegime(fg?.value ?? null);
+      res.end(JSON.stringify({ fearGreed: fg, btcDominance: btcDom, fundingRate: funding, regime }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // 404
+  res.statusCode = 404;
+  res.end(JSON.stringify({ error: 'Not found' }));
 }
 
-http.createServer(handleRequest).listen(PORT,()=>console.log('TC Proxy on port',PORT));
+http.createServer(handleRequest).listen(PORT, () => {
+  console.log(`tc-proxy running on port ${PORT}`);
+});
