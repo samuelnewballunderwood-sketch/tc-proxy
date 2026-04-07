@@ -157,6 +157,21 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /accounts-debug — fetch 3Commas accounts to get account IDs ──────────
+  if (req.method === 'GET' && url === '/accounts-debug') {
+    try {
+      const qs = 'limit=10';
+      const path = '/ver1/accounts';
+      const sig = hmacSign(TC_SECRET, path + '?' + qs);
+      const r = await fetch('https://api.3commas.io' + path + '?' + qs, {
+        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+      });
+      const raw = await r.text();
+      res.end(JSON.stringify({ status: r.status, body: raw.slice(0, 2000), keyPrefix: TC_KEY?.slice(0,12) + '...' }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
   // ── GET /bots-debug — raw 3Commas responses for diagnosis ──────────────────
   if (req.method === 'GET' && url === '/bots-debug') {
     try {
