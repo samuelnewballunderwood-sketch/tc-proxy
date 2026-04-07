@@ -157,17 +157,31 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /accounts-debug — fetch 3Commas accounts to get account IDs ──────────
+  // ── GET /accounts-debug — try multiple 3Commas query variations ────────────
   if (req.method === 'GET' && url === '/accounts-debug') {
     try {
-      const qs = 'limit=10';
-      const path = '/ver1/accounts';
-      const sig = hmacSign(TC_SECRET, path + '?' + qs);
-      const r = await fetch('https://api.3commas.io' + path + '?' + qs, {
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
-      });
-      const raw = await r.text();
-      res.end(JSON.stringify({ status: r.status, body: raw.slice(0, 2000), keyPrefix: TC_KEY?.slice(0,12) + '...' }));
+      async function tcTry(path, qs) {
+        const fullPath = qs ? path + '?' + qs : path;
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+        });
+        return { status: r.status, body: (await r.text()).slice(0, 400) };
+      }
+      const results = await Promise.all([
+        tcTry('/ver1/bots', 'limit=100&account_id=33439515'),
+        tcTry('/ver1/bots', 'limit=100'),
+        tcTry('/ver1/bots', ''),
+        tcTry('/ver1/grid_bots', 'limit=100&account_id=33439515'),
+        tcTry('/ver1/grid_bots', 'limit=100'),
+        tcTry('/ver1/accounts', 'limit=10'),
+        tcTry('/ver1/users/me', ''),
+      ]);
+      const labels = ['bots+accountId', 'bots-noFilter', 'bots-noQS', 'grid+accountId', 'grid-noFilter', 'accounts', 'me'];
+      const out = {};
+      labels.forEach((l, i) => out[l] = results[i]);
+      out.keyPrefix = TC_KEY?.slice(0,12) + '...';
+      res.end(JSON.stringify(out));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
