@@ -157,30 +157,36 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /bots  (3Commas) ────────────────────────────────────────────────────
+  // ── GET /bots  (3Commas — DCA + Signal + Grid combined) ────────────────────
   if (req.method === 'GET' && url === '/bots') {
     try {
-      const qs   = 'limit=100';
-      const path = '/ver1/bots';
-      // 3Commas v1: sign path only (no query string)
-      const sig  = hmacSign(TC_SECRET, path + '?' + qs);
-      const r    = await fetch('https://api.3commas.io' + path + '?' + qs, {
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
-      });
-      // 204 = valid empty response (no bots match query)
-      if (r.status === 204) {
-        res.end(JSON.stringify({ bots: [], total: 0 }));
-        return;
+      async function tc3Fetch(path, qs) {
+        const fullPath = path + '?' + qs;
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+        });
+        if (r.status === 204) return [];
+        const raw = await r.text();
+        let data;
+        try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas HTTP ' + r.status + ' [' + path + ']: ' + raw.slice(0,300)); }
+        if (!Array.isArray(data) && data.error) throw new Error('3Commas error [' + path + ']: ' + JSON.stringify(data.error));
+        return Array.isArray(data) ? data : [];
       }
-      const raw  = await r.text();
-      let data;
-      try { data = JSON.parse(raw); } catch(e) { throw new Error('3Commas HTTP ' + r.status + ' parse error: [' + raw.slice(0,400) + ']'); }
-      if (!Array.isArray(data) && data.error) throw new Error('3Commas error HTTP ' + r.status + ': ' + JSON.stringify(data.error));
-      const bots = (Array.isArray(data) ? data : []).map(b => ({
+
+      // Fetch DCA/signal bots AND grid bots in parallel
+      const [dcaRaw, gridRaw] = await Promise.all([
+        tc3Fetch('/ver1/bots',      'limit=100'),
+        tc3Fetch('/ver1/grid_bots', 'limit=100'),
+      ]);
+
+      // Normalise DCA/signal bots
+      const dcaBots = dcaRaw.map(b => ({
         id:            b.id,
         name:          b.name,
         pair:          b.pairs?.[0] || b.pair,
-        strategy:      b.strategy,
+        strategy:      b.strategy || 'dca',
+        botType:       'dca',
         capital:       parseFloat(b.base_order_volume || 0),
         profit:        parseFloat(b.completed_deals_usd_profit || 0),
         completedDeals:parseInt(b.finished_deals_count || 0),
@@ -189,7 +195,25 @@ async function handleRequest(req, res) {
         marketType:    b.type === 'Bot::MultiBot' ? 'futures' : 'spot',
         active:        b.is_enabled,
       }));
-      res.end(JSON.stringify({ bots, total: bots.length }));
+
+      // Normalise grid bots
+      const gridBots = gridRaw.map(b => ({
+        id:            b.id,
+        name:          b.name,
+        pair:          b.pair || (b.currency_pair ? b.currency_pair.replace('_', '') : null),
+        strategy:      'grid',
+        botType:       'grid',
+        capital:       parseFloat(b.investment || b.upper_price || 0),
+        profit:        parseFloat(b.total_profit || 0),
+        completedDeals:parseInt(b.grids_quantity || 0),
+        activeDeals:   b.is_active ? 1 : 0,
+        direction:     'long',
+        marketType:    b.type?.includes('future') || b.type?.includes('Future') ? 'futures' : 'spot',
+        active:        b.is_active || b.enabled,
+      }));
+
+      const bots = [...dcaBots, ...gridBots];
+      res.end(JSON.stringify({ bots, total: bots.length, dcaCount: dcaBots.length, gridCount: gridBots.length }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
