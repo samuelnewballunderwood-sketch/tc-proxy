@@ -157,6 +157,27 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /bots-debug — raw 3Commas responses for diagnosis ──────────────────
+  if (req.method === 'GET' && url === '/bots-debug') {
+    try {
+      async function tcRaw(path, qs) {
+        const fullPath = path + '?' + qs;
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+        });
+        const text = await r.text();
+        return { status: r.status, body: text.slice(0, 500) };
+      }
+      const [dca, grid] = await Promise.all([
+        tcRaw('/ver1/bots', 'limit=100'),
+        tcRaw('/ver1/grid_bots', 'limit=100'),
+      ]);
+      res.end(JSON.stringify({ dca, grid, keyPrefix: TC_KEY?.slice(0,12) + '...' }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
   // ── GET /bots  (3Commas — DCA + Signal + Grid combined) ────────────────────
   if (req.method === 'GET' && url === '/bots') {
     try {
