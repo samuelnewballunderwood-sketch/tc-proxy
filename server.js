@@ -211,9 +211,10 @@ async function handleRequest(req, res) {
       }
 
       // Fetch DCA/signal bots AND grid bots in parallel
+      // account_id=33439515 scopes results to the correct Binance exchange account
       const [dcaRaw, gridRaw] = await Promise.all([
-        tc3Fetch('/ver1/bots',      'limit=100'),
-        tc3Fetch('/ver1/grid_bots', 'limit=100'),
+        tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515'),
+        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515'),
       ]);
 
       // Normalise DCA/signal bots
