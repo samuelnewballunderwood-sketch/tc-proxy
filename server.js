@@ -161,10 +161,10 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/accounts-debug') {
     try {
       async function tcTry(path, qs) {
-        const fullPath = qs ? path + '?' + qs : path;
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
         const sig = hmacSign(TC_SECRET, fullPath);
         const r = await fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
         });
         return { status: r.status, body: (await r.text()).slice(0, 400) };
       }
@@ -190,10 +190,10 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/bots-debug') {
     try {
       async function tcRaw(path, qs) {
-        const fullPath = path + '?' + qs;
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
         const sig = hmacSign(TC_SECRET, fullPath);
         const r = await fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
         });
         const text = await r.text();
         return { status: r.status, body: text.slice(0, 500) };
@@ -211,10 +211,10 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/bots') {
     try {
       async function tc3Fetch(path, qs) {
-        const fullPath = path + '?' + qs;
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
         const sig = hmacSign(TC_SECRET, fullPath);
         const r = await fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
         });
         if (r.status === 204) return [];
         const raw = await r.text();
@@ -279,11 +279,11 @@ async function handleRequest(req, res) {
         res.statusCode = 400; res.end(JSON.stringify({ error: 'Usage: POST /bot/:id/enable|disable' })); return;
       }
       const endpoint = action === 'enable' ? 'enable' : 'disable';
-      const path     = `/ver1/bots/${botId}/${endpoint}`;
-      const sig      = hmacSign(TC_SECRET, path + '');
+      const path     = `/public/api/ver1/bots/${botId}/${endpoint}`;
+      const sig      = hmacSign(TC_SECRET, path);
       const r        = await fetch(`https://api.3commas.io${path}`, {
         method: 'POST',
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
       });
       const data = await r.json();
       if (data.error) throw new Error(JSON.stringify(data.error));
@@ -295,10 +295,10 @@ async function handleRequest(req, res) {
   // ── GET /deals/summary ──────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
-      const dealsPath = '/ver1/deals?limit=1000&scope=completed';
+      const dealsPath = '/public/api/ver1/deals?limit=1000&scope=completed';
       const sig = hmacSign(TC_SECRET, dealsPath);
       const r   = await fetch('https://api.3commas.io' + dealsPath, {
-        headers: { 'APIKEY': TC_KEY, 'Signature': sig }
+        headers: { 'Apikey': TC_KEY, 'Signature': sig }
       });
       if (r.status === 204) {
         res.end(JSON.stringify({ completedDeals: 0, activeDeals: 0, totalOrders: 0, totalProfit: 0 }));
