@@ -157,56 +157,6 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /accounts-debug — try multiple 3Commas query variations ────────────
-  if (req.method === 'GET' && url === '/accounts-debug') {
-    try {
-      async function tcTry(path, qs) {
-        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
-        const sig = hmacSign(TC_SECRET, fullPath);
-        const r = await fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
-        });
-        return { status: r.status, body: (await r.text()).slice(0, 400) };
-      }
-      const results = await Promise.all([
-        tcTry('/ver1/bots', 'limit=100&account_id=33439515'),
-        tcTry('/ver1/bots', 'limit=100'),
-        tcTry('/ver1/bots', ''),
-        tcTry('/ver1/grid_bots', 'limit=100&account_id=33439515'),
-        tcTry('/ver1/grid_bots', 'limit=100'),
-        tcTry('/ver1/accounts', 'limit=10'),
-        tcTry('/ver1/users/me', ''),
-      ]);
-      const labels = ['bots+accountId', 'bots-noFilter', 'bots-noQS', 'grid+accountId', 'grid-noFilter', 'accounts', 'me'];
-      const out = {};
-      labels.forEach((l, i) => out[l] = results[i]);
-      out.keyPrefix = TC_KEY?.slice(0,12) + '...';
-      res.end(JSON.stringify(out));
-    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
-    return;
-  }
-
-  // ── GET /bots-debug — raw 3Commas responses for diagnosis ──────────────────
-  if (req.method === 'GET' && url === '/bots-debug') {
-    try {
-      async function tcRaw(path, qs) {
-        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
-        const sig = hmacSign(TC_SECRET, fullPath);
-        const r = await fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
-        });
-        const text = await r.text();
-        return { status: r.status, body: text.slice(0, 500) };
-      }
-      const [dca, grid] = await Promise.all([
-        tcRaw('/ver1/bots', 'limit=100'),
-        tcRaw('/ver1/grid_bots', 'limit=100'),
-      ]);
-      res.end(JSON.stringify({ dca, grid, keyPrefix: TC_KEY?.slice(0,12) + '...' }));
-    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
-    return;
-  }
-
   // ── GET /bots  (3Commas — DCA + Signal + Grid combined) ────────────────────
   if (req.method === 'GET' && url === '/bots') {
     try {
