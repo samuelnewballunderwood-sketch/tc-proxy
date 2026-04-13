@@ -326,28 +326,38 @@ async function handleRequest(req, res) {
         };
       });
 
+      // Known bot capital overrides (for futures grids where API doesn't expose margin)
+      const KNOWN_GRID_CAPITAL = {
+        2758668: 800,   // ETH SHORT x3
+        2758366: 1700,  // BTC SHORT x3
+        2757088: 293,   // BTC LONG spot
+        2757086: 0,     // ETH LONG — closed
+        2757090: 0,     // SOL LONG — closed
+        2757091: 0,     // BNB — closed
+        2757106: 0,     // SOL — closed
+        2752385: 0,     // BTC old — closed
+      };
+
       // Normalise grid bots
       const gridBots = gridRaw.map(b => {
-        // Detect direction from name or strategy
+        // Detect direction from name or pair
         const name = (b.name || '').toUpperCase();
-        const isFuturesGrid = name.includes('260925') || name.includes('PERP') ||
-          b.type?.toLowerCase().includes('future') ||
-          (b.pair || '').includes('260925');
+        const pair = (b.pair || '').toUpperCase();
+        // SHORT grids: contains SHORT in name, or futures quarterly (260925) with price trending
+        // For quarterly futures grids, direction is set by the grid type in 3Commas
+        // We detect it: if name has SHORT or if it's a futures grid we launched as short
+        const isFuturesGrid = name.includes('260925') || pair.includes('260925') ||
+          (b.type || '').toLowerCase().includes('future');
         const isShortGrid = name.includes('SHORT') ||
-          (b.lower_price && b.current_price && parseFloat(b.lower_price) > parseFloat(b.current_price));
+          (isFuturesGrid && ['2758668','2758366'].includes(String(b.id)));
 
-        // Capital: for futures grids use initial_investment or margin_investment
-        // For spot grids use investment (actual USDT deployed)
-        let capital = 0;
-        if (isFuturesGrid) {
-          // Futures grid: investment field holds margin invested
-          capital = parseFloat(b.investment || b.initial_investment || b.margin || 0);
-          // If investment is suspiciously large (>= upper_price), it's wrong — use 0
-          if (capital >= parseFloat(b.upper_price || 0) * 0.9) capital = 0;
-        } else {
-          // Spot grid: investment is the USDT allocated
-          capital = parseFloat(b.investment || 0);
-          if (capital >= parseFloat(b.upper_price || 0) * 0.9) capital = 0;
+        // Capital: use known override first, then API investment, then 0
+        let capital = KNOWN_GRID_CAPITAL[b.id];
+        if (capital === undefined) {
+          const apiCap = parseFloat(b.investment || 0);
+          const upperP = parseFloat(b.upper_price || 0);
+          // Only use API capital if it's not the upper_price (sanity check)
+          capital = (apiCap > 0 && apiCap < upperP * 0.5) ? apiCap : 0;
         }
 
         return {
