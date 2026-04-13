@@ -19,9 +19,11 @@ COMPANY & PRODUCT
 THE TRIAL — CURRENT STATE
 - Trial 2 started: 10 April 2026. Ends: 10 May 2026. 30 days.
 - Capital deployed: ~$9,177 USDT (Binance Spot $5,409 + Futures USDT-M $3,767)
-- Trial target: 10% locked profit = $920 by Day 30
-- Daily required: ~$30.70/day to hit target
-- Locked profit carried from Trial 1: ~$110
+- Trial target: 6% locked profit = $552 by Day 30 (floor) | 10% stretch = $920
+- Daily required: ~$19/day to hit 6% target | ~$30.70/day for 10% stretch
+- Locked profit as of Day 3 (April 13): ~$40 ($24.90 DCA + $14.78 grid)
+- Three losing LONG grids closed April 12 (total -$13.67 realised losses — R2 compliance)
+- Bear setup: BTC SHORT x3 grid ($1,700 margin), ETH SHORT x3 grid ($800 margin) now earning
 - Trial 1 result: $130.93 locked (1.42%) — market was in extreme fear (F&G 13), hedge bots outperformed longs
 
 WHAT "LOCKED PROFIT" MEANS — CRITICAL
@@ -57,10 +59,11 @@ CURRENT BOT PORTFOLIO — Post April 11 Calibration (Trial 2 clean state)
 - ETH HEDGE BOT (id:16809699) — $80 base, short futures hedge
 - BTC BREAK OUT BOT (id:16801317) — $500 base, triggers on BTC momentum
 
-Binance Native Grid Bots (4 active, post-calibration):
-- ETH/USDT Spot Grid — $688 invested (scaled up — best grid)
-- BTC/USDT Spot Grid x2 — $500 + $292
-- SOL/USDT Spot Grid — $527 invested (scaled up)
+Active 3Commas Grid Bots (post April 12 bear switch):
+- BTC SHORT x3 Futures Grid (BTCUSDT_260925) — $1,700 margin, range $62k-$78k, trailing down, +$7.09 so far
+- ETH SHORT x3 Futures Grid (ETHUSDT_260925) — $800 margin, range $2,165-$2,450, just launched
+- BTC/USDT LONG Spot Grid — $293 invested, +$7.61 locked, running 11 days, proven survivor
+Closed April 12 (R2 violations): ETH LONG grid (-$2.76), SOL LONG grid (-$4.66), BTC LONG $500 grid (-$6.25)
 
 PERMANENTLY STOPPED BOTS — Never reference as active
 - BTC LONG FUTURES BOT — stopped, -$7.85, force closed
@@ -132,8 +135,10 @@ function deriveRegime(fg) {
 
 async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Content-Type', 'application/json');
-  if (req.method === 'OPTIONS') { res.end('{}'); return; }
+  if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
 
   const TC_KEY    = process.env.TC_API_KEY;
   const TC_SECRET = process.env.TC_SECRET;
@@ -283,44 +288,83 @@ async function handleRequest(req, res) {
         return Array.isArray(data) ? data : [];
       }
 
-      // Fetch DCA/signal bots AND grid bots in parallel
-      // account_id=33439515 scopes results to the correct Binance exchange account
-      const [dcaRaw, gridRaw] = await Promise.all([
+      // Fetch DCA bots, grid bots, AND completed deals for real profit figures — all in parallel
+      const [dcaRaw, gridRaw, dealsRaw] = await Promise.all([
         tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515'),
         tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515'),
+        tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33439515').catch(() => []),
       ]);
 
-      // Normalise DCA/signal bots
-      const dcaBots = dcaRaw.map(b => ({
-        id:            b.id,
-        name:          b.name,
-        pair:          b.pairs?.[0] || b.pair,
-        strategy:      b.strategy || 'dca',
-        botType:       'dca',
-        capital:       parseFloat(b.base_order_volume || 0),
-        profit:        parseFloat(b.completed_deals_usd_profit || 0),
-        completedDeals:parseInt(b.finished_deals_count || 0),
-        activeDeals:   parseInt(b.active_deals_count || 0),
-        direction:     b.strategy === 'short' ? 'short' : 'long',
-        marketType:    b.type === 'Bot::MultiBot' ? 'futures' : 'spot',
-        active:        b.is_enabled,
-      }));
+      // Build per-bot profit map from completed deals
+      const dealProfitByBot = {};
+      (dealsRaw || []).forEach(d => {
+        const botId = d.bot_id;
+        if (!botId) return;
+        const profit = parseFloat(d.final_profit || 0);
+        dealProfitByBot[botId] = (dealProfitByBot[botId] || 0) + profit;
+      });
+
+      // Normalise DCA/signal bots — only include enabled OR those with profit history
+      const dcaBots = dcaRaw.map(b => {
+        const dealProfit = dealProfitByBot[b.id] || 0;
+        // Use completed_deals_usd_profit from bot object as primary, fall back to deal sum
+        const reportedProfit = parseFloat(b.completed_deals_usd_profit || 0);
+        const profit = reportedProfit !== 0 ? reportedProfit : dealProfit;
+        return {
+          id:            b.id,
+          name:          b.name,
+          pair:          b.pairs?.[0] || b.pair,
+          strategy:      b.strategy || 'dca',
+          botType:       'dca',
+          capital:       parseFloat(b.base_order_volume || 0),
+          profit,
+          completedDeals:parseInt(b.finished_deals_count || 0),
+          activeDeals:   parseInt(b.active_deals_count || 0),
+          direction:     b.strategy === 'short' ? 'short' : 'long',
+          marketType:    (b.type === 'Bot::MultiBot' || (b.pairs?.[0] || '').includes('_PERP') || (b.pairs?.[0] || '').includes('260925')) ? 'futures' : 'spot',
+          active:        b.is_enabled,
+        };
+      });
 
       // Normalise grid bots
-      const gridBots = gridRaw.map(b => ({
-        id:            b.id,
-        name:          b.name,
-        pair:          b.pair || (b.currency_pair ? b.currency_pair.replace('_', '') : null),
-        strategy:      'grid',
-        botType:       'grid',
-        capital:       parseFloat(b.investment || b.upper_price || 0),
-        profit:        parseFloat(b.total_profit || 0),
-        completedDeals:parseInt(b.grids_quantity || 0),
-        activeDeals:   b.is_active ? 1 : 0,
-        direction:     'long',
-        marketType:    b.type?.includes('future') || b.type?.includes('Future') ? 'futures' : 'spot',
-        active:        b.is_active || b.enabled,
-      }));
+      const gridBots = gridRaw.map(b => {
+        // Detect direction from name or strategy
+        const name = (b.name || '').toUpperCase();
+        const isFuturesGrid = name.includes('260925') || name.includes('PERP') ||
+          b.type?.toLowerCase().includes('future') ||
+          (b.pair || '').includes('260925');
+        const isShortGrid = name.includes('SHORT') ||
+          (b.lower_price && b.current_price && parseFloat(b.lower_price) > parseFloat(b.current_price));
+
+        // Capital: for futures grids use initial_investment or margin_investment
+        // For spot grids use investment (actual USDT deployed)
+        let capital = 0;
+        if (isFuturesGrid) {
+          // Futures grid: investment field holds margin invested
+          capital = parseFloat(b.investment || b.initial_investment || b.margin || 0);
+          // If investment is suspiciously large (>= upper_price), it's wrong — use 0
+          if (capital >= parseFloat(b.upper_price || 0) * 0.9) capital = 0;
+        } else {
+          // Spot grid: investment is the USDT allocated
+          capital = parseFloat(b.investment || 0);
+          if (capital >= parseFloat(b.upper_price || 0) * 0.9) capital = 0;
+        }
+
+        return {
+          id:            b.id,
+          name:          b.name,
+          pair:          b.pair || (b.currency_pair ? b.currency_pair.replace('_', '') : null),
+          strategy:      'grid',
+          botType:       'grid',
+          capital,
+          profit:        parseFloat(b.total_profit || b.current_profit || 0),
+          completedDeals:parseInt(b.grids_quantity || 0),
+          activeDeals:   b.is_active ? 1 : 0,
+          direction:     isShortGrid ? 'short' : 'long',
+          marketType:    isFuturesGrid ? 'futures' : 'spot',
+          active:        b.is_active || b.enabled,
+        };
+      });
 
       const bots = [...dcaBots, ...gridBots];
       res.end(JSON.stringify({ bots, total: bots.length, dcaCount: dcaBots.length, gridCount: gridBots.length }));
