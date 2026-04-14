@@ -339,7 +339,9 @@ async function handleRequest(req, res) {
           completedDeals:parseInt(b.finished_deals_count || 0),
           activeDeals:   parseInt(b.active_deals_count || 0),
           direction:     b.strategy === 'short' ? 'short' : 'long',
-          marketType:    (b.type === 'Bot::MultiBot' || (b.pairs?.[0] || '').includes('_PERP') || (b.pairs?.[0] || '').includes('260925')) ? 'futures' : 'spot',
+          // marketType: Bot::MultiBot uses USDT_XXX pair format on spot account — still spot
+          // Only mark futures if explicitly a perp/quarterly contract or futures account
+          marketType:    (() => { const p = (b.pairs?.[0] || b.pair || ''); return (p.includes('_PERP') || p.includes('260925') || (b.type === 'Bot::MultiBot' && b.account_id === 33439515)) ? 'futures' : 'spot'; })(),
           active:        isEnabled,
         };
       });
