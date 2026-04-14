@@ -606,10 +606,10 @@ async function handleRequest(req, res) {
         gridCount: Array.isArray(gridAll) ? gridAll.length : 0,
         gridBots: Array.isArray(gridAll) ? gridAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,investment:b.investment,investment_quote:b.investment_quote_currency})) : gridAll,
       };
-      cors(res); res.writeHead(200,{'Content-Type':'application/json'});
+      res.writeHead(200,{'Content-Type':'application/json'});
       res.end(JSON.stringify(result));
     } catch(e) {
-      cors(res); res.writeHead(500,{'Content-Type':'application/json'});
+      res.writeHead(500,{'Content-Type':'application/json'});
       res.end(JSON.stringify({error:e.message}));
     }
     return;
