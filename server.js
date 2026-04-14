@@ -288,12 +288,30 @@ async function handleRequest(req, res) {
         return Array.isArray(data) ? data : [];
       }
 
-      // Fetch DCA bots, grid bots, AND completed deals for real profit figures — all in parallel
-      const [dcaRaw, gridRaw, dealsRaw] = await Promise.all([
+      // Fetch from BOTH accounts in parallel:
+      // 33438577 = Binance Spot (active DCA bots + spot grids live here)
+      // 33439515 = Binance Futures (legacy hedge bots + short grids)
+      const [dcaSpot, dcaFut, gridSpot, gridFut, dealsSpot, dealsFut, activeDealsSpot, activeDealsFut] = await Promise.all([
+        tc3Fetch('/ver1/bots',      'limit=100&account_id=33438577'),
         tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515'),
+        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33438577'),
         tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515'),
+        tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33438577').catch(() => []),
         tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33439515').catch(() => []),
+        tc3Fetch('/ver1/deals',     'limit=100&scope=active&account_id=33438577').catch(() => []),
+        tc3Fetch('/ver1/deals',     'limit=100&scope=active&account_id=33439515').catch(() => []),
       ]);
+      const dcaRaw  = [...dcaSpot,  ...dcaFut];
+      const gridRaw = [...gridSpot, ...gridFut];
+      const dealsRaw = [...dealsSpot, ...dealsFut];
+
+      // Build per-bot active capital from open deals (bought_volume = real committed USDT)
+      const activeDealCapital = {};
+      [...activeDealsSpot, ...activeDealsFut].forEach(d => {
+        if (!d.bot_id) return;
+        const vol = parseFloat(d.bought_volume || d.base_order_volume || 0);
+        activeDealCapital[d.bot_id] = (activeDealCapital[d.bot_id] || 0) + vol;
+      });
 
       // Build per-bot profit map from completed deals
       const dealProfitByBot = {};
@@ -316,7 +334,7 @@ async function handleRequest(req, res) {
           pair:          b.pairs?.[0] || b.pair,
           strategy:      b.strategy || 'dca',
           botType:       'dca',
-          capital:       isEnabled ? parseFloat(b.base_order_volume || 0) : 0,
+          capital:       isEnabled ? (activeDealCapital[b.id] || parseFloat(b.base_order_volume || 0)) : 0,
           profit,
           completedDeals:parseInt(b.finished_deals_count || 0),
           activeDeals:   parseInt(b.active_deals_count || 0),
@@ -326,17 +344,9 @@ async function handleRequest(req, res) {
         };
       });
 
-      // Known bot capital overrides (for futures grids where API doesn't expose margin)
-      const KNOWN_GRID_CAPITAL = {
-        2758668: 0,   // ETH SHORT x3 — CLOSED April 14
-        2758366: 0,   // BTC SHORT x3 — CLOSED April 14
-        2757088: 293, // BTC LONG spot — still running
-        2757086: 0,   // ETH LONG — closed
-        2757090: 0,   // SOL LONG — closed
-        2757091: 0,   // BNB — closed
-        2757106: 0,   // SOL — closed
-        2752385: 0,   // BTC old — closed
-      };
+      // No manual capital overrides — investment_quote_currency confirmed accurate from API
+      // Active bots return their real invested USDT; closed/disabled return 0.0
+      const KNOWN_GRID_CAPITAL = {};
 
       // Normalise grid bots
       const gridBots = gridRaw.map(b => {
@@ -422,18 +432,21 @@ async function handleRequest(req, res) {
   // ── GET /deals/summary ──────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
-      const dealsPath = '/public/api/ver1/deals?limit=1000&scope=completed';
-      const sig = hmacSign(TC_SECRET, dealsPath);
-      const r   = await fetch('https://api.3commas.io' + dealsPath, {
-        headers: { 'Apikey': TC_KEY, 'Signature': sig }
-      });
-      if (r.status === 204) {
-        res.end(JSON.stringify({ completedDeals: 0, activeDeals: 0, totalOrders: 0, totalProfit: 0 }));
-        return;
+      function tcDealsFetch(accountId) {
+        const path = `/public/api/ver1/deals?limit=1000&scope=completed&account_id=${accountId}`;
+        const sig = hmacSign(TC_SECRET, path);
+        return fetch('https://api.3commas.io' + path, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig }
+        }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const data = await r.json();
-      if (data.error) throw new Error(JSON.stringify(data.error));
-      const deals        = Array.isArray(data) ? data : [];
+      const [dealsSpot, dealsFut] = await Promise.all([
+        tcDealsFetch(33438577),
+        tcDealsFetch(33439515),
+      ]);
+      const deals = [
+        ...(Array.isArray(dealsSpot) ? dealsSpot : []),
+        ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+      ];
       const totalProfit  = deals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       const totalOrders  = deals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
       res.end(JSON.stringify({
