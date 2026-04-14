@@ -604,7 +604,7 @@ async function handleRequest(req, res) {
       if (!subject || !html) { res.statusCode = 400; res.end(JSON.stringify({ error: 'subject and html required' })); return; }
       const RESEND_KEY = process.env.RESEND_API_KEY;
       if (!RESEND_KEY) { res.statusCode = 500; res.end(JSON.stringify({ error: 'RESEND_API_KEY not set' })); return; }
-      const recipient = to || process.env.ALERT_EMAIL || 'sam@thebottlestore.ae';
+      const recipient = to || process.env.ALERT_EMAIL || 'samuel.newballunderwood@googlemail.com';
       const r = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
