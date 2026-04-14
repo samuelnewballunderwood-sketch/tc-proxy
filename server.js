@@ -400,8 +400,17 @@ async function handleRequest(req, res) {
         };
       });
 
-      const bots = [...dcaBots, ...gridBots];
-      res.end(JSON.stringify({ bots, total: bots.length, dcaCount: dcaBots.length, gridCount: gridBots.length }));
+      // Deduplicate by ID — fetching both accounts can return the same bot twice
+      const seenIds = new Set();
+      const allBots = [...dcaBots, ...gridBots];
+      const bots = allBots.filter(b => {
+        if (seenIds.has(b.id)) return false;
+        seenIds.add(b.id);
+        return true;
+      });
+      const finalDca  = bots.filter(b => b.botType === 'dca');
+      const finalGrid = bots.filter(b => b.botType === 'grid');
+      res.end(JSON.stringify({ bots, total: bots.length, dcaCount: finalDca.length, gridCount: finalGrid.length }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
