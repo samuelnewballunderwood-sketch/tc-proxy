@@ -537,6 +537,91 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── POST /grid-bot/:id/disable ─────────────────────────────────────────────
+  // Requires BOTS_WRITE permission on AlphaControl Final API key
+  if (req.method === 'POST' && url.match(/^\/grid-bot\/\d+\/disable$/)) {
+    try {
+      const botId = url.split('/')[2];
+      const path  = `/public/api/ver1/grid_bots/${botId}/disable`;
+      const sig   = hmacSign(TC_SECRET, path);
+      const r     = await fetch('https://api.3commas.io' + path, {
+        method: 'POST',
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      res.end(JSON.stringify({ success: true, bot_id: botId, is_enabled: data.is_enabled, name: data.name }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
+    return;
+  }
+
+  // ── POST /grid-bot/:id/enable ──────────────────────────────────────────────
+  if (req.method === 'POST' && url.match(/^\/grid-bot\/\d+\/enable$/)) {
+    try {
+      const botId = url.split('/')[2];
+      const path  = `/public/api/ver1/grid_bots/${botId}/enable`;
+      const sig   = hmacSign(TC_SECRET, path);
+      const r     = await fetch('https://api.3commas.io' + path, {
+        method: 'POST',
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json' },
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      res.end(JSON.stringify({ success: true, bot_id: botId, is_enabled: data.is_enabled, name: data.name }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
+    return;
+  }
+
+  // ── GET /regime ────────────────────────────────────────────────────────────
+  // Returns F&G current + previous, regime label, and crossing flags
+  if (req.method === 'GET' && url === '/regime') {
+    try {
+      const r    = await fetch('https://api.alternative.me/fng/?limit=2');
+      const data = await r.json();
+      const vals = data.data || [];
+      const current  = parseInt(vals[0]?.value || 0);
+      const previous = parseInt(vals[1]?.value || 0);
+      const crossedBull = previous < 30 && current >= 30;
+      const crossedBear = previous >= 30 && current < 30;
+      const regime = current >= 60 ? 'GREED' : current >= 30 ? 'NEUTRAL' : current >= 20 ? 'FEAR' : 'EXTREME_FEAR';
+      res.end(JSON.stringify({
+        current, previous, regime,
+        crossedBull, crossedBear,
+        label: vals[0]?.value_classification || '',
+        timestamp: new Date().toISOString(),
+      }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── POST /send-alert ───────────────────────────────────────────────────────
+  // Sends email via Resend. Env vars: RESEND_API_KEY, ALERT_EMAIL
+  // Body: { subject: string, html: string, to?: string }
+  if (req.method === 'POST' && url === '/send-alert') {
+    try {
+      const body = await readBody(req);
+      const { subject, html, to } = JSON.parse(body);
+      if (!subject || !html) { res.statusCode = 400; res.end(JSON.stringify({ error: 'subject and html required' })); return; }
+      const RESEND_KEY = process.env.RESEND_API_KEY;
+      if (!RESEND_KEY) { res.statusCode = 500; res.end(JSON.stringify({ error: 'RESEND_API_KEY not set' })); return; }
+      const recipient = to || process.env.ALERT_EMAIL || 'sam@thebottlestore.ae';
+      const r = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: 'AlphaControl <onboarding@resend.dev>',
+          to: [recipient],
+          subject,
+          html,
+        }),
+      });
+      const result = await r.json();
+      if (!r.ok) throw new Error(JSON.stringify(result));
+      res.end(JSON.stringify({ success: true, email_id: result.id }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
+    return;
+  }
+
   // 404
   res.statusCode = 404;
   res.end(JSON.stringify({ error: 'Not found' }));
