@@ -304,10 +304,10 @@ async function handleRequest(req, res) {
         dealProfitByBot[botId] = (dealProfitByBot[botId] || 0) + profit;
       });
 
-      // Normalise DCA/signal bots — only include enabled OR those with profit history
+      // Normalise DCA/signal bots
       const dcaBots = dcaRaw.map(b => {
+        const isEnabled = b.is_enabled === true;
         const dealProfit = dealProfitByBot[b.id] || 0;
-        // Use completed_deals_usd_profit from bot object as primary, fall back to deal sum
         const reportedProfit = parseFloat(b.completed_deals_usd_profit || 0);
         const profit = reportedProfit !== 0 ? reportedProfit : dealProfit;
         return {
@@ -316,26 +316,26 @@ async function handleRequest(req, res) {
           pair:          b.pairs?.[0] || b.pair,
           strategy:      b.strategy || 'dca',
           botType:       'dca',
-          capital:       parseFloat(b.base_order_volume || 0),
+          capital:       isEnabled ? parseFloat(b.base_order_volume || 0) : 0,
           profit,
           completedDeals:parseInt(b.finished_deals_count || 0),
           activeDeals:   parseInt(b.active_deals_count || 0),
           direction:     b.strategy === 'short' ? 'short' : 'long',
           marketType:    (b.type === 'Bot::MultiBot' || (b.pairs?.[0] || '').includes('_PERP') || (b.pairs?.[0] || '').includes('260925')) ? 'futures' : 'spot',
-          active:        b.is_enabled,
+          active:        isEnabled,
         };
       });
 
       // Known bot capital overrides (for futures grids where API doesn't expose margin)
       const KNOWN_GRID_CAPITAL = {
-        2758668: 800,   // ETH SHORT x3
-        2758366: 1700,  // BTC SHORT x3
-        2757088: 293,   // BTC LONG spot
-        2757086: 0,     // ETH LONG — closed
-        2757090: 0,     // SOL LONG — closed
-        2757091: 0,     // BNB — closed
-        2757106: 0,     // SOL — closed
-        2752385: 0,     // BTC old — closed
+        2758668: 0,   // ETH SHORT x3 — CLOSED April 14
+        2758366: 0,   // BTC SHORT x3 — CLOSED April 14
+        2757088: 293, // BTC LONG spot — still running
+        2757086: 0,   // ETH LONG — closed
+        2757090: 0,   // SOL LONG — closed
+        2757091: 0,   // BNB — closed
+        2757106: 0,   // SOL — closed
+        2752385: 0,   // BTC old — closed
       };
 
       // Normalise grid bots
@@ -449,16 +449,54 @@ async function handleRequest(req, res) {
   // ── GET /market-signals ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/market-signals') {
     try {
-      const [fgRes, domRes, fundRes] = await Promise.all([
+      const [fgRes, domRes, fundRes, btc24hRes] = await Promise.all([
         fetch('https://api.alternative.me/fng/?limit=1').then(r => r.json()).catch(() => null),
         fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()).catch(() => null),
         fetch('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1').then(r => r.json()).catch(() => null),
+        fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT').then(r => r.json()).catch(() => null),
       ]);
-      const fg       = fgRes?.data?.[0] ? { value: parseInt(fgRes.data[0].value), label: fgRes.data[0].value_classification } : null;
+
+      // Base F&G from alternative.me (daily, midnight UTC)
+      const fgBase   = fgRes?.data?.[0] ? parseInt(fgRes.data[0].value) : null;
+      const fgLabel  = fgRes?.data?.[0]?.value_classification || null;
       const btcDom   = domRes?.data?.market_cap_percentage?.btc ? Math.round(domRes.data.market_cap_percentage.btc * 10) / 10 : null;
       const funding  = fundRes?.[0] ? parseFloat(fundRes[0].fundingRate) * 100 : null;
-      const regime   = deriveRegime(fg?.value ?? null);
-      res.end(JSON.stringify({ fearGreed: fg, btcDominance: btcDom, fundingRate: funding, regime }));
+
+      // Intraday adjustment — alt.me updates daily at midnight UTC
+      // We adjust the base reading using current BTC momentum + funding to get a live estimate
+      // This is the same approach 3Commas and other platforms use
+      let fgAdjusted = fgBase;
+      let fgSource   = 'alt.me daily';
+      if (fgBase !== null && btc24hRes?.priceChangePercent !== undefined) {
+        const btcChange = parseFloat(btc24hRes.priceChangePercent);
+        const btcHigh   = parseFloat(btc24hRes.highPrice);
+        const btcLow    = parseFloat(btc24hRes.lowPrice);
+        const btcClose  = parseFloat(btc24hRes.lastPrice);
+
+        // Price momentum component: BTC +5% adds ~30 points toward greed, -5% subtracts ~30
+        const momentumAdj = Math.round(btcChange * 6);
+
+        // Funding rate component: positive funding = mild greed (+3), negative = fear (-3)
+        const fundingAdj = funding !== null ? (funding > 0.01 ? 3 : funding < -0.005 ? -3 : 0) : 0;
+
+        // Intraday recovery component: high/low range position
+        // If price is in top 70% of today's range → bullish intraday momentum
+        const range = btcHigh - btcLow;
+        const rangeAdj = range > 0 ? Math.round(((btcClose - btcLow) / range - 0.5) * 10) : 0;
+
+        fgAdjusted = Math.min(100, Math.max(0, fgBase + momentumAdj + fundingAdj + rangeAdj));
+        fgSource   = 'alt.me+intraday';
+      }
+
+      // Derive classification from adjusted value
+      const classify = v => v >= 80 ? 'Extreme Greed' : v >= 60 ? 'Greed' : v >= 45 ? 'Neutral' : v >= 26 ? 'Fear' : 'Extreme Fear';
+      const fg = fgAdjusted !== null
+        ? { value: fgAdjusted, label: classify(fgAdjusted), base: fgBase, source: fgSource }
+        : null;
+
+      const regime = deriveRegime(fgAdjusted ?? null);
+      res.end(JSON.stringify({ fearGreed: fg, btcDominance: btcDom, fundingRate: funding, regime,
+        btc24h: btc24hRes ? { change: parseFloat(btc24hRes.priceChangePercent), price: parseFloat(btc24hRes.lastPrice) } : null }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
@@ -546,6 +584,37 @@ async function handleRequest(req, res) {
   }
 
   // ── GET /health ───────────────────────────────────────────────────────────
+  // ── GET /debug-tc ── discover all 3Commas accounts + all bots (no account filter) ──
+  if (req.method === 'GET' && url === '/debug-tc') {
+    try {
+      function tcFetch(path, qs) {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        return fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        }).then(r=>r.json());
+      }
+      const [accounts, dcaAll, gridAll] = await Promise.all([
+        tcFetch('/ver1/accounts', 'limit=100'),
+        tcFetch('/ver1/bots',     'limit=100'),
+        tcFetch('/ver1/grid_bots','limit=100'),
+      ]);
+      const result = {
+        accounts: Array.isArray(accounts) ? accounts.map(a=>({id:a.id,name:a.name,exchange:a.exchange_name,balance:a.usd_amount})) : accounts,
+        dcaCount: Array.isArray(dcaAll) ? dcaAll.length : 0,
+        dcaBots: Array.isArray(dcaAll) ? dcaAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,activeDeals:b.active_deals_count,base_order:b.base_order_volume,strategy_list:b.strategy_list?.map(s=>s.strategy)})) : dcaAll,
+        gridCount: Array.isArray(gridAll) ? gridAll.length : 0,
+        gridBots: Array.isArray(gridAll) ? gridAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,investment:b.investment,investment_quote:b.investment_quote_currency})) : gridAll,
+      };
+      cors(res); res.writeHead(200,{'Content-Type':'application/json'});
+      res.end(JSON.stringify(result));
+    } catch(e) {
+      cors(res); res.writeHead(500,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({error:e.message}));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && url === '/health') {
     res.end(JSON.stringify({ status: 'ok', service: 'tc-proxy-eu', timestamp: new Date().toISOString() }));
     return;
