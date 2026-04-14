@@ -354,11 +354,25 @@ async function handleRequest(req, res) {
         // Capital: use known override first, then API investment, then 0
         let capital = KNOWN_GRID_CAPITAL[b.id];
         if (capital === undefined) {
-          const apiCap = parseFloat(b.investment || 0);
-          const upperP = parseFloat(b.upper_price || 0);
-          // Only use API capital if it's not the upper_price (sanity check)
-          capital = (apiCap > 0 && apiCap < upperP * 0.5) ? apiCap : 0;
+          // 3Commas grid bot capital: try multiple fields
+          const apiInvestment = parseFloat(b.investment || 0);
+          const apiQuote = parseFloat(b.investment_quote_currency || 0);
+          const apiBase  = parseFloat(b.investment_base_currency  || 0);
+          const upperP   = parseFloat(b.upper_price || 0);
+          // Use quote investment (USDT value) if available
+          if (apiQuote > 0) {
+            capital = apiQuote;
+          } else if (apiInvestment > 0 && apiInvestment < upperP * 0.5) {
+            capital = apiInvestment;
+          } else if (apiBase > 0) {
+            capital = apiBase;
+          } else {
+            capital = 0;
+          }
         }
+
+        // Active: 3Commas grid bots use is_enabled (not is_active or enabled)
+        const isActive = b.is_enabled === true || b.is_active === true || b.enabled === true;
 
         return {
           id:            b.id,
@@ -369,10 +383,10 @@ async function handleRequest(req, res) {
           capital,
           profit:        parseFloat(b.total_profit || b.current_profit || 0),
           completedDeals:parseInt(b.grids_quantity || 0),
-          activeDeals:   b.is_active ? 1 : 0,
+          activeDeals:   isActive ? 1 : 0,
           direction:     isShortGrid ? 'short' : 'long',
           marketType:    isFuturesGrid ? 'futures' : 'spot',
-          active:        b.is_active || b.enabled,
+          active:        isActive,
         };
       });
 
