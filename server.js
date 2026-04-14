@@ -609,7 +609,7 @@ async function handleRequest(req, res) {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          from: 'AlphaControl <onboarding@resend.dev>',
+          from: 'AlphaControl <alerts@bjbots.ai>',
           to: [recipient],
           subject,
           html,
