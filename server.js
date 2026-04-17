@@ -411,7 +411,7 @@ async function handleRequest(req, res) {
           strategy:      'grid',
           botType:       'grid',
           capital,
-          profit:        parseFloat(b.total_profit || b.current_profit || 0),
+          profit:        isActive ? parseFloat(b.total_profit || b.current_profit || 0) : 0,
           completedDeals:parseInt(b.grids_quantity || 0),
           activeDeals:   isActive ? 1 : 0,
           direction:     isShortGrid ? 'short' : 'long',
