@@ -338,9 +338,45 @@ async function handleRequest(req, res) {
         };
       });
 
-      // No manual capital overrides — investment_quote_currency confirmed accurate from API
-      // Active bots return their real invested USDT; closed/disabled return 0.0
-      const KNOWN_GRID_CAPITAL = {};
+      // Also fetch live prices AND Binance wallet locked balances
+      // to compute full grid capital (USDT + base currency side)
+      // 3Commas investment_base_currency is null for spot grids — use wallet instead
+      const [priceRes, walletRes] = await Promise.all([
+        fetch('https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","BNBUSDT"]').catch(() => null),
+        (async () => {
+          const q = `timestamp=${Date.now()}`;
+          const sig = hmacSign(BN_SECRET, q);
+          return fetch(`https://api.binance.com/api/v3/account?${q}&signature=${sig}`, {
+            headers: { 'X-MBX-APIKEY': BN_KEY }
+          }).then(r => r.ok ? r.json() : null).catch(() => null);
+        })(),
+      ]);
+      const priceMap = {};
+      if (priceRes?.ok) {
+        const pd = await priceRes.json();
+        if (Array.isArray(pd)) pd.forEach(p => { priceMap[p.symbol] = parseFloat(p.price); });
+      }
+      // Build locked balance map: asset -> USD value of locked tokens
+      const lockedMap = {};
+      if (walletRes?.balances) {
+        walletRes.balances.forEach(b => {
+          const locked = parseFloat(b.locked || 0);
+          if (locked > 0 && b.asset !== 'USDT') {
+            const price = priceMap[b.asset + 'USDT'] || 0;
+            if (price > 0) lockedMap[b.asset] = { usd: locked * price, totalUsdtSide: 0 };
+          }
+        });
+      }
+      // Pre-compute total USDT side per base asset across all active grids
+      // Needed for proportional split when multiple grids share same base asset
+      gridRaw.filter(b => b.is_enabled).forEach(b => {
+        const pair = (b.pair || b.currency_pair || '').toUpperCase().replace('_','').replace('/','');
+        const baseAsset = pair.replace('USDT','').replace('BUSD','');
+        const usdt = parseFloat(b.investment_quote_currency || 0);
+        if (baseAsset && lockedMap[baseAsset]) {
+          lockedMap[baseAsset].totalUsdtSide = (lockedMap[baseAsset].totalUsdtSide || 0) + usdt;
+        }
+      });
 
       // Normalise grid bots
       const gridBots = gridRaw.map(b => {
@@ -355,25 +391,11 @@ async function handleRequest(req, res) {
         const isShortGrid = name.includes('SHORT') ||
           (isFuturesGrid && ['2758668','2758366'].includes(String(b.id)));
 
-        // Capital: use known override first, then API investment, then 0
-        let capital = KNOWN_GRID_CAPITAL[b.id];
-        if (capital === undefined) {
-          // 3Commas grid bot capital: try multiple fields
-          const apiInvestment = parseFloat(b.investment || 0);
-          const apiQuote = parseFloat(b.investment_quote_currency || 0);
-          const apiBase  = parseFloat(b.investment_base_currency  || 0);
-          const upperP   = parseFloat(b.upper_price || 0);
-          // Use quote investment (USDT value) if available
-          if (apiQuote > 0) {
-            capital = apiQuote;
-          } else if (apiInvestment > 0 && apiInvestment < upperP * 0.5) {
-            capital = apiInvestment;
-          } else if (apiBase > 0) {
-            capital = apiBase;
-          } else {
-            capital = 0;
-          }
-        }
+        // Capital: use investment_quote_currency (USDT side of the grid)
+        // Note: grids also hold base currency (BTC/ETH/SOL/XRP) but this isn't
+        // exposed by 3Commas API. Total portfolio capital comes from Binance wallet
+        // (grandTotal in reconciliation) which correctly counts all assets.
+        let capital = parseFloat(b.investment_quote_currency || 0);
 
         // Active: 3Commas grid bots use is_enabled (not is_active or enabled)
         const isActive = b.is_enabled === true || b.is_active === true || b.enabled === true;
