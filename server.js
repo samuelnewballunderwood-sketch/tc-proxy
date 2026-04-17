@@ -305,11 +305,15 @@ async function handleRequest(req, res) {
         activeDealCapital[d.bot_id] = (activeDealCapital[d.bot_id] || 0) + vol;
       });
 
-      // Build per-bot profit map from completed deals
+      // Build per-bot profit map from completed deals — Trial 2 only (from April 12 2026)
+      const TRIAL2_START = new Date('2026-04-12T00:00:00Z').getTime();
       const dealProfitByBot = {};
       (dealsRaw || []).forEach(d => {
         const botId = d.bot_id;
         if (!botId) return;
+        // Filter to Trial 2 deals only using closed_at timestamp
+        const closedAt = d.closed_at ? new Date(d.closed_at).getTime() : 0;
+        if (closedAt > 0 && closedAt < TRIAL2_START) return; // skip Trial 1 deals
         const profit = parseFloat(d.final_profit || 0);
         dealProfitByBot[botId] = (dealProfitByBot[botId] || 0) + profit;
       });
@@ -318,8 +322,8 @@ async function handleRequest(req, res) {
       const dcaBots = dcaRaw.map(b => {
         const isEnabled = b.is_enabled === true;
         const dealProfit = dealProfitByBot[b.id] || 0;
-        const reportedProfit = parseFloat(b.completed_deals_usd_profit || 0);
-        const profit = reportedProfit !== 0 ? reportedProfit : dealProfit;
+        // Use trial-scoped deal profit (filtered to April 12+) not all-time reported profit
+        const profit = dealProfit;
         return {
           id:            b.id,
           name:          b.name,
