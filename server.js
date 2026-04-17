@@ -458,7 +458,66 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── GET /deals/summary ──────────────────────────────────────────────────────
+  // ── GET /deals/detail ───────────────────────────────────────────────────────
+  // Debug endpoint: shows all completed deals with timestamps, grouped by bot
+  // Used to verify trial-scoped vs all-time profit figures
+  if (req.method === 'GET' && url === '/deals/detail') {
+    try {
+      function tcDealsFetch2(accountId) {
+        const path = `/public/api/ver1/deals?limit=1000&scope=completed&account_id=${accountId}`;
+        const sig = hmacSign(TC_SECRET, path);
+        return fetch('https://api.3commas.io' + path, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig }
+        }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
+      }
+      const [dealsSpot, dealsFut] = await Promise.all([
+        tcDealsFetch2(33438577),
+        tcDealsFetch2(33439515),
+      ]);
+      const deals = [
+        ...(Array.isArray(dealsSpot) ? dealsSpot : []),
+        ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+      ];
+      const TRIAL2_START = '2026-04-12T00:00:00Z';
+      const t2ts = new Date(TRIAL2_START).getTime();
+
+      // Group by bot name
+      const byBot = {};
+      deals.forEach(d => {
+        const name = d.bot_name || d.bot_id || 'unknown';
+        if (!byBot[name]) byBot[name] = { trial1: [], trial2: [] };
+        const closedAt = d.closed_at ? new Date(d.closed_at).getTime() : 0;
+        const profit = parseFloat(d.final_profit || 0);
+        const entry = { closed_at: d.closed_at, profit: profit.toFixed(4) };
+        if (closedAt >= t2ts) byBot[name].trial2.push(entry);
+        else byBot[name].trial1.push(entry);
+      });
+
+      // Summarise per bot
+      const summary = Object.entries(byBot).map(([name, data]) => ({
+        bot: name,
+        trial1_deals: data.trial1.length,
+        trial1_profit: data.trial1.reduce((s,d)=>s+parseFloat(d.profit),0).toFixed(2),
+        trial2_deals: data.trial2.length,
+        trial2_profit: data.trial2.reduce((s,d)=>s+parseFloat(d.profit),0).toFixed(2),
+        latest_deal: [...data.trial1, ...data.trial2].sort((a,b)=>new Date(b.closed_at)-new Date(a.closed_at))[0]?.closed_at || null,
+      })).sort((a,b)=>parseFloat(b.trial2_profit)-parseFloat(a.trial2_profit));
+
+      const totalTrial2 = summary.reduce((s,b)=>s+parseFloat(b.trial2_profit),0);
+      const totalTrial1 = summary.reduce((s,b)=>s+parseFloat(b.trial1_profit),0);
+
+      res.end(JSON.stringify({
+        trial2_start: TRIAL2_START,
+        total_deals: deals.length,
+        trial2_total_profit: totalTrial2.toFixed(2),
+        trial1_total_profit: totalTrial1.toFixed(2),
+        by_bot: summary,
+      }, null, 2));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
       function tcDealsFetch(accountId) {
