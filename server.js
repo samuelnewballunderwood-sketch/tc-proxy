@@ -51,11 +51,15 @@ Bull:     DCA Long 50%, Spot Grid 30%, Hedge 5%, Futures Grid 15%
 Bear:     DCA Long 0%, Spot Grid 40%, Hedge 45%, Futures Grid 15%
 Sideways: DCA Long 25%, Spot Grid 50%, Hedge 10%, Futures Grid 15%
 
-Active 3Commas Grid Bots (post April 12 bear switch):
-- BTC SHORT x3 Futures Grid (BTCUSDT_260925) — $1,700 margin, range $62k-$78k, trailing down, +$7.09 so far
-- ETH SHORT x3 Futures Grid (ETHUSDT_260925) — $800 margin, range $2,165-$2,450, just launched
-- BTC/USDT LONG Spot Grid — $293 invested, +$7.61 locked, running 11 days, proven survivor
-Closed April 12 (R2 violations): ETH LONG grid (-$2.76), SOL LONG grid (-$4.66), BTC LONG $500 grid (-$6.25)
+Active 3Commas Grid Bots (as of Trial 2 Day 7, April 18 2026):
+- BTC Futures Quarterly Grid (id 2761473, BTCUSDT_260925) — $3,390 margin
+- ETH/USDT Spot Grid (id 2761423) — $991 invested
+- BTC/USDT Spot Grid (id 2761412) — $1,000 invested
+- SOL/USDT Spot Grid (id 2761214) — $500 invested
+- XRP/USDT Spot Grid (id 2761209) — $300 invested
+- BTC/USDT #2 Spot Grid (id 2759654) — $299 invested
+Trial 1 grids (closed, profit NOT counted toward Trial 2 locked): 2758668, 2758366 (quarterly futures shorts); 2752385, 2757086, 2757088, 2757090, 2757091, 2757106 (legacy spot, closed at April 12 reset).
+For live per-grid locked profit figures, always read from the injected portfolio context — never quote static numbers from this prompt.
 
 PERMANENTLY STOPPED BOTS — Never reference as active
 - BTC LONG FUTURES BOT — stopped, -$7.85, force closed
@@ -409,10 +413,15 @@ async function handleRequest(req, res) {
           ? (knownCap !== undefined ? knownCap : apiCap)
           : 0;
 
-        // Profit: count ALL grids that ran in Trial 2 (active AND previously active)
-        // Exclude only Trial 1 quarterly futures grids (260925 suffix, OLD ids only)
-        const isOldTrial1Futures = ['2758668','2758366'].includes(String(b.id));
-        const profit = isOldTrial1Futures ? 0 : parseFloat(b.total_profit || b.current_profit || 0);
+        // Profit: count ALL grids that ran in Trial 2 (active AND previously active).
+        // Exclude Trial 1 grids — their total_profit is all-time and must not bleed
+        // into Trial 2 locked profit. Confirmed Trial 1:
+        //   2758668, 2758366 — quarterly futures shorts closed pre-Trial-2
+        //   2752385, 2757086, 2757088, 2757090, 2757091, 2757106 — legacy spot grids
+        //     closed at/around 2026-04-12 Trial 2 reset
+        const TRIAL1_GRID_IDS = ['2758668','2758366','2752385','2757086','2757088','2757090','2757091','2757106'];
+        const isTrial1Grid = TRIAL1_GRID_IDS.includes(String(b.id));
+        const profit = isTrial1Grid ? 0 : parseFloat(b.total_profit || b.current_profit || 0);
 
         return {
           id:             b.id,
