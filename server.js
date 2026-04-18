@@ -384,39 +384,49 @@ async function handleRequest(req, res) {
 
       // Normalise grid bots
       const gridBots = gridRaw.map(b => {
-        // Detect direction from name or pair
         const name = (b.name || '').toUpperCase();
         const pair = (b.pair || '').toUpperCase();
-        // SHORT grids: contains SHORT in name, or futures quarterly (260925) with price trending
-        // For quarterly futures grids, direction is set by the grid type in 3Commas
-        // We detect it: if name has SHORT or if it's a futures grid we launched as short
         const isFuturesGrid = name.includes('260925') || pair.includes('260925') ||
           (b.type || '').toLowerCase().includes('future');
         const isShortGrid = name.includes('SHORT') ||
           (isFuturesGrid && ['2758668','2758366'].includes(String(b.id)));
-
-        // Capital: use investment_quote_currency (USDT side of the grid)
-        // Note: grids also hold base currency (BTC/ETH/SOL/XRP) but this isn't
-        // exposed by 3Commas API. Total portfolio capital comes from Binance wallet
-        // (grandTotal in reconciliation) which correctly counts all assets.
-        let capital = parseFloat(b.investment_quote_currency || 0);
-
-        // Active: 3Commas grid bots use is_enabled (not is_active or enabled)
         const isActive = b.is_enabled === true || b.is_active === true || b.enabled === true;
 
+        // Capital: use known investment amounts — API only returns current USDT-in-orders
+        // which fluctuates constantly as the grid buys/sells. We use the original investment.
+        // For grids not in this map, fall back to API investment_quote_currency.
+        const KNOWN_GRID_CAPITAL = {
+          2759654: 299,   // BTC #2 spot grid $299
+          2761209: 300,   // XRP spot grid $300
+          2761214: 500,   // SOL spot grid $500
+          2761423: 991,   // ETH spot grid $991
+          2761412: 1000,  // BTC spot grid $1,000
+          // 2761473 BTC futures quarterly — investment varies, use API value
+        };
+        const knownCap = KNOWN_GRID_CAPITAL[b.id];
+        const apiCap = parseFloat(b.investment_quote_currency || 0);
+        const capital = isActive
+          ? (knownCap !== undefined ? knownCap : apiCap)
+          : 0;
+
+        // Profit: count ALL grids that ran in Trial 2 (active AND previously active)
+        // Exclude only Trial 1 quarterly futures grids (260925 suffix, OLD ids only)
+        const isOldTrial1Futures = ['2758668','2758366'].includes(String(b.id));
+        const profit = isOldTrial1Futures ? 0 : parseFloat(b.total_profit || b.current_profit || 0);
+
         return {
-          id:            b.id,
-          name:          b.name,
-          pair:          b.pair || (b.currency_pair ? b.currency_pair.replace('_', '') : null),
-          strategy:      'grid',
-          botType:       'grid',
+          id:             b.id,
+          name:           b.name,
+          pair:           b.pair || (b.currency_pair ? b.currency_pair.replace('_', '') : null),
+          strategy:       'grid',
+          botType:        'grid',
           capital,
-          profit:        isActive ? parseFloat(b.total_profit || b.current_profit || 0) : 0,
-          completedDeals:parseInt(b.grids_quantity || 0),
-          activeDeals:   isActive ? 1 : 0,
-          direction:     isShortGrid ? 'short' : 'long',
-          marketType:    isFuturesGrid ? 'futures' : 'spot',
-          active:        isActive,
+          profit,
+          completedDeals: parseInt(b.grids_quantity || 0),
+          activeDeals:    isActive ? 1 : 0,
+          direction:      isShortGrid ? 'short' : 'long',
+          marketType:     isFuturesGrid ? 'futures' : 'spot',
+          active:         isActive,
         };
       });
 
@@ -705,7 +715,7 @@ async function handleRequest(req, res) {
         dcaCount: Array.isArray(dcaAll) ? dcaAll.length : 0,
         dcaBots: Array.isArray(dcaAll) ? dcaAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,activeDeals:b.active_deals_count,base_order:b.base_order_volume,strategy_list:b.strategy_list?.map(s=>s.strategy)})) : dcaAll,
         gridCount: Array.isArray(gridAll) ? gridAll.length : 0,
-        gridBots: Array.isArray(gridAll) ? gridAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,investment:b.investment,investment_quote:b.investment_quote_currency})) : gridAll,
+        gridBots: Array.isArray(gridAll) ? gridAll.map(b=>({id:b.id,name:b.name,account_id:b.account_id,enabled:b.is_enabled,investment:b.investment,investment_quote:b.investment_quote_currency,investment_base:b.investment_base_currency,total_investment:b.total_investment,current_quantity:b.current_quantity,quantity_per_grid:b.quantity_per_grid,upper_price:b.upper_price,lower_price:b.lower_price})) : gridAll,
       };
       res.writeHead(200,{'Content-Type':'application/json'});
       res.end(JSON.stringify(result));
