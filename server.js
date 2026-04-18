@@ -740,6 +740,22 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /api/config ───────────────────────────────────────────────────────
+  // Hannah stack config (Simli + ElevenLabs) for the dashboard. Prefers env vars
+  // on Render; falls back to the current shipped values so deploy is zero-downtime
+  // while the vars get configured.
+  // TODO: once SIMLI_API_KEY / SIMLI_FACE_ID / ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID
+  // are set in Render, rotate the four keys and delete the fallbacks below.
+  if (req.method === 'GET' && url === '/api/config') {
+    res.end(JSON.stringify({
+      simliKey:    process.env.SIMLI_API_KEY       || 'rwq4j9njja9lg0q9d45b9',
+      simliFace:   process.env.SIMLI_FACE_ID       || 'cace3ef7-a4c4-425d-a8cf-a5358eb0c427',
+      elevenKey:   process.env.ELEVENLABS_API_KEY  || 'sk_ff8bfc6a100041f7f1a8deecd344751943573cc708f37b22',
+      elevenVoice: process.env.ELEVENLABS_VOICE_ID || 'FX7Ed0mBTbZ495AXR8ky',
+    }));
+    return;
+  }
+
   // ── POST /grid-bot/:id/disable ─────────────────────────────────────────────
   // Requires BOTS_WRITE permission on AlphaControl Final API key
   if (req.method === 'POST' && url.match(/^\/grid-bot\/\d+\/disable$/)) {
