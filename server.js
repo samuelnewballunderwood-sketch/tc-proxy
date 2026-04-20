@@ -17,7 +17,7 @@ CONVERSATION STYLE
 
 COMPANY & PRODUCT
 - Strix Labs (strixlabs.ai) — AI-powered capital management infrastructure
-- AlphaControl (alphacontrol.ai / bjbots.ai) — the flagship product. The intelligence layer between execution tools (3Commas) and tracking tools (CoinStats). A gap that doesn't exist at retail price point.
+- AlphaControl (alphacontrol.ai) — the flagship product. The intelligence layer between execution tools (3Commas) and tracking tools (CoinStats). A gap that doesn't exist at retail price point.
 - Positioning: "Like Plaid, but for trading bots" — sits above exchanges as orchestration layer
 - Hub71/ADGM pitch in Abu Dhabi — the 30-day live trial ends Day 30. Results are the centrepiece of the pitch.
 - Founders: Jp (product/vision) and Sam (engineering)
@@ -828,7 +828,7 @@ async function handleRequest(req, res) {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          from: 'AlphaControl <alerts@bjbots.ai>',
+          from: 'AlphaControl <alerts@alphacontrol.ai>',
           to: [recipient],
           subject,
           html,
