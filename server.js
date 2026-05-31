@@ -876,6 +876,43 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Learning loop v1: aggregates the persistent action log ──
+  if (req.method === 'GET' && url === '/api/learning') {
+    try {
+      const histR = await fetch('https://alphacontrol.ai/api/hannah-actions');
+      const hist = histR.ok ? await histR.json() : { actions: [] };
+      const actions = hist.actions || [];
+      const byEvent = {}, byObj = {}, byAsset = {};
+      let executed = 0, dryRun = 0, skipped = 0, errored = 0;
+      const since = Date.now() - 7*24*60*60*1000;
+      for (const a of actions) {
+        if (new Date(a.ts).getTime() < since) continue;
+        byEvent[a.event] = (byEvent[a.event] || 0) + 1;
+        const obj = a.decision?.objective || 'unknown';
+        byObj[obj] = (byObj[obj] || 0) + 1;
+        const asset = a.decision?.suggestedAsset;
+        if (asset) byAsset[asset] = (byAsset[asset] || 0) + 1;
+        if (a.event === 'executed') {
+          executed++;
+          const r0 = (a.results||[])[0];
+          if (r0?.created === false) errored++;
+        }
+        if (a.event === 'dry_run') dryRun++;
+        if (a.event === 'cap_reached' || (a.results||[])[0]?.skipped) skipped++;
+      }
+      res.end(JSON.stringify({
+        window: 'last_7_days',
+        total: Object.values(byEvent).reduce((s,n)=>s+n,0),
+        byEvent, byObjective: byObj, byAsset,
+        outcomes: { executed, dryRun, skipped, errored },
+        insight: errored > executed ? 'high failure rate — review payload constraints' :
+                 skipped > executed ? 'mostly skipped (dedupe/cap/conf) — system at equilibrium' :
+                 executed > 0 ? 'actively executing' : 'no activity yet',
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Hannah performance summary ───────────────────────────────────
   if (req.method === 'GET' && url === '/api/hannah-performance') {
     try {
