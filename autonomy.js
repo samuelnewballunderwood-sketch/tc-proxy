@@ -84,9 +84,10 @@ async function getOpenDealBotIds() {
 // ── Allowlist of auto-executable (actionType, objective) pairs ──────
 // Expand as more decision types prove safe.
 const ALLOWLIST = [
-  { actionType: 'reduce',     objective: 'idle_capital' },
-  { actionType: 'reallocate', objective: 'idle_capital' },
-  // future: { actionType: 'reduce', objective: 'bot_efficiency' } once trusted
+  { actionType: 'pause',      objective: 'idle_capital'  },  // signal bot pause (existing)
+  { actionType: 'reduce',     objective: 'idle_capital'  },  // idle bot capital recovery
+  { actionType: 'reallocate', objective: 'idle_capital'  },
+  { actionType: 'reduce',     objective: 'bot_efficiency'},  // R3/R4 underperformer close
 ];
 
 function isAllowed(d) {
