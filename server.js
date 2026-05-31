@@ -916,6 +916,10 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: 'TC keys not configured' }));
         return;
       }
+      // ── Convert per-grid USDT → BASE currency amount (3Commas wants BASE)
+      const midPrice = (upper + lower) / 2;
+      const usdtPerGrid = totalQuote / grids;
+      const baseQtyPerGrid = +(usdtPerGrid / midPrice).toFixed(8);
       const fullPath = '/public/api/ver1/grid_bots/manual';
       const payload = {
         account_id: accountId,
@@ -923,7 +927,9 @@ async function handleRequest(req, res) {
         upper_price: upper,
         lower_price: lower,
         grids_quantity: grids,
-        quantity_per_grid: +(totalQuote / grids).toFixed(8), // USDT per cell
+        quantity_per_grid: baseQtyPerGrid,                 // BASE amount per cell (BTC, ETH, etc.)
+        total_invest_amount: +totalQuote.toFixed(2),       // belt + braces: quote total
+        upper_stop_loss_percentage: 5,                      // stops 5% above upper
         name: body.name || ('Hannah-Auto-' + pair + '-' + Date.now()),
       };
       const sig = hmacSign(TC_API_SECRET, fullPath + JSON.stringify(payload));
