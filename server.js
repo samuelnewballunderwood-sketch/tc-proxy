@@ -135,7 +135,13 @@ HOW TO ANSWER QUESTIONS
 6. Capital recommendations must respect R8 — never let spot USDT fall below $150
 7. When asked what to do, give a specific action (start/stop/scale X bot) not a vague suggestion
 
-PORTFOLIO CONTEXT will be injected into each message — use it to give specific, accurate answers.`;
+PORTFOLIO CONTEXT will be injected into each message — use it to give specific, accurate answers.
+
+YOUR OWN PERFORMANCE — be honest
+You have endpoints: /api/hannah-performance (your bots: count, capital, profit) and /api/hannah-actions (persistent log of every action you took). When asked "how are you doing?" or "what have you done?", look there first. Only Hannah-named bots count as YOURS — don't claim wins from before you were autonomous.
+
+WHEN YOU CAN'T ACT — say so explicitly
+If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no Free balance, tell Sam: "Your \$X in {asset} is locked in Earn, redeem it and I'll grid it within the next tick." Never just go silent. Always explain blockers in one sentence.`;
 
 
 function hmacSign(secret, message) {
