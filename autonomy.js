@@ -101,6 +101,8 @@ const ALLOWLIST = [
 // Track the last auto-grid creation to enforce daily cap
 let _lastGridCreatedAt = 0;
 const GRID_CREATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// In-flight create lock — prevents concurrent ticks from creating dupes per asset
+const _gridCreateInFlight = new Set();
 
 function isAllowed(d) {
   return ALLOWLIST.some(a =>
@@ -118,6 +120,10 @@ async function executeDecision(decision, openDealBotIds) {
     const pair = decision.suggestedPair || 'USDT_BTC';
     const asset = decision.suggestedAsset || (pair.split('_')[1] || 'BTC');
 
+    // In-flight lock (prevents the race that produced duplicate XRP grids)
+    if (_gridCreateInFlight.has(asset)) {
+      return [{ skipped: `in-flight — ${asset} grid creation already running` }];
+    }
     // Dedupe: skip if a Hannah grid for THIS asset already exists
     try {
       const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
@@ -129,6 +135,7 @@ async function executeDecision(decision, openDealBotIds) {
         return [{ skipped: `dedupe — Hannah ${asset} grid already exists`, botId: hannahGrid.id, name: hannahGrid.name }];
       }
     } catch (_) {}
+    _gridCreateInFlight.add(asset);
 
     // Resolve price
     let price = 0;
@@ -152,13 +159,18 @@ async function executeDecision(decision, openDealBotIds) {
       accountId: 33438577,
       name: 'Hannah-' + asset + '-' + new Date().toISOString().slice(0,10),
     };
-    const cr = await fetch('https://tc-proxy-eu.onrender.com/api/create-grid', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(spec),
-    });
-    const cjRaw = await cr.text();
-    let cj; try { cj = JSON.parse(cjRaw); } catch { cj = cjRaw; }
-    if (cr.ok) _lastGridCreatedAt = Date.now();
+    let cr, cj;
+    try {
+      cr = await fetch('https://tc-proxy-eu.onrender.com/api/create-grid', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(spec),
+      });
+      const cjRaw = await cr.text();
+      try { cj = JSON.parse(cjRaw); } catch { cj = cjRaw; }
+      if (cr.ok) _lastGridCreatedAt = Date.now();
+    } finally {
+      _gridCreateInFlight.delete(asset);
+    }
     return [{ created: cr.ok, status: cr.status, response: cj, spec }];
   }
 
