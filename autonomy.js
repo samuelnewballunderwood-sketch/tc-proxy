@@ -17,11 +17,11 @@
 const crypto = require('crypto');
 
 const WORKER_BASE       = process.env.WORKER_BASE        || 'https://alphacontrol.ai';
-const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   === 'true';
-const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   !== 'false'; // default ON
+const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   !== 'false'; // default ON (set 'false' to disable)
+const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   === 'true';  // default OFF — trade live (set 'true' for dry-run)
 const AUTONOMY_KILL     = process.env.AUTONOMY_KILL_SWITCH === 'true';
-const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '2', 10);
-const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '80', 10);
+const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '5', 10);
+const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '60', 10);
 
 const TC_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
 const TC_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
