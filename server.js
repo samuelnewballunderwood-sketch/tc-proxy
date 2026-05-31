@@ -919,7 +919,19 @@ async function handleRequest(req, res) {
       // ── Convert per-grid USDT → BASE currency amount (3Commas wants BASE)
       const midPrice = (upper + lower) / 2;
       const usdtPerGrid = totalQuote / grids;
-      const baseQtyPerGrid = Math.round((usdtPerGrid / midPrice) * 100000) / 100000;
+      // Per-asset lot step (Binance Spot step sizes)
+      const baseAsset = (pair.split('_')[1] || '').toUpperCase();
+      const STEP_BY_ASSET = {
+        BTC: 0.00001, ETH: 0.0001, BNB: 0.001,
+        SOL: 0.001,   XRP: 0.1,    ADA: 0.1,
+        DOGE: 1,      MATIC: 0.1,  LINK: 0.01,
+      };
+      const step = STEP_BY_ASSET[baseAsset] || 0.001;
+      const rawBaseQty = usdtPerGrid / midPrice;
+      const baseQtyPerGrid = Math.round(rawBaseQty / step) * step;
+      // Re-precision to avoid float gunk like 0.0820000000001
+      const decimals = Math.max(0, -Math.floor(Math.log10(step)));
+      const baseQtyClean = +baseQtyPerGrid.toFixed(decimals);
       const fullPath = '/public/api/ver1/grid_bots/manual';
       const payload = {
         account_id: accountId,
@@ -927,7 +939,7 @@ async function handleRequest(req, res) {
         upper_price: upper,
         lower_price: lower,
         grids_quantity: grids,
-        quantity_per_grid: baseQtyPerGrid,                 // BASE amount per cell (BTC, ETH, etc.)
+        quantity_per_grid: baseQtyClean,                   // BASE amount per cell (BTC, ETH, etc.)
         total_invest_amount: +totalQuote.toFixed(2),       // belt + braces: quote total
         upper_stop_loss_percentage: 5,                      // stops 5% above upper
         name: (body.name || ('Hannah-' + pair + '-' + Date.now())).slice(0, 40),
