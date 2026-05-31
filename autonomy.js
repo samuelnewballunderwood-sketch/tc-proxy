@@ -133,7 +133,7 @@ async function executeDecision(decision, openDealBotIds) {
       gridQuantity: 30,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
-      name: 'Hannah-Auto-BTC-Defensive-' + new Date().toISOString().slice(0,10),
+      name: 'Hannah-BTC-' + new Date().toISOString().slice(0,10),
     };
     const cr = await fetch('https://tc-proxy-eu.onrender.com/api/create-grid', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -930,7 +930,7 @@ async function handleRequest(req, res) {
         quantity_per_grid: baseQtyPerGrid,                 // BASE amount per cell (BTC, ETH, etc.)
         total_invest_amount: +totalQuote.toFixed(2),       // belt + braces: quote total
         upper_stop_loss_percentage: 5,                      // stops 5% above upper
-        name: body.name || ('Hannah-Auto-' + pair + '-' + Date.now()),
+        name: (body.name || ('Hannah-' + pair + '-' + Date.now())).slice(0, 40),
       };
       const sig = hmacSign(TC_API_SECRET, fullPath + JSON.stringify(payload));
       const r = await fetch('https://api.3commas.io' + fullPath, {
