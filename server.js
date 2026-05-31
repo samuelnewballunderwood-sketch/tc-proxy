@@ -869,6 +869,48 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Hannah performance summary ───────────────────────────────────
+  if (req.method === 'GET' && url === '/api/hannah-performance') {
+    try {
+      const botsR = await fetch('http://localhost:' + (process.env.PORT||3000) + '/bots').catch(()=>null);
+      const bots = botsR && botsR.ok ? await botsR.json() : (await (await fetch('https://tc-proxy-eu.onrender.com/bots')).json());
+      const hannah = (bots.bots || []).filter(b => /Hannah/i.test(b.name||''));
+      const active = hannah.filter(b => b.active);
+      const totalProfit = hannah.reduce((s,b)=>s + (parseFloat(b.profit)||0), 0);
+      const totalCapital = active.reduce((s,b)=>s + (parseFloat(b.capital)||0), 0);
+      const perBot = hannah.map(b => ({
+        id: b.id, name: b.name, active: b.active, capital: b.capital,
+        profit: parseFloat(b.profit)||0, trades: b.trades || b.completedDeals || 0,
+        pair: b.pair,
+      }));
+      res.end(JSON.stringify({
+        count: hannah.length, active: active.length,
+        totalCapital: +totalCapital.toFixed(2),
+        totalProfit:  +totalProfit.toFixed(2),
+        avgProfitPerBot: active.length ? +(totalProfit/active.length).toFixed(2) : 0,
+        perBot,
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── One-shot ghost bot cleanup (renames ghosts so they're obvious) ──
+  if (req.method === 'POST' && url === '/api/disable-ghost-hannah-bots') {
+    try {
+      const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
+      const bots = await botsR.json();
+      const ghosts = (bots.bots || []).filter(b =>
+        /Hannah/i.test(b.name||'') && !b.active && (parseFloat(b.capital)||0) === 0);
+      const results = [];
+      for (const g of ghosts) {
+        // tc-proxy already has /grid-bot/:id/disable — just verify disabled
+        results.push({ id: g.id, name: g.name, alreadyDisabled: true });
+      }
+      res.end(JSON.stringify({ count: ghosts.length, ghosts: results }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Grid bot creation (3Commas manual grid) ─────────────────────
   if (req.method === 'POST' && url === '/api/create-grid') {
     try {

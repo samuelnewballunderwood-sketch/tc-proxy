@@ -45,6 +45,11 @@ function logEvent(entry) {
   recentActions.unshift(e);
   if (recentActions.length > 200) recentActions.length = 200;
   console.log('[autonomy]', JSON.stringify(e));
+  // Persistent log to worker KV (fire-and-forget)
+  fetch(WORKER_BASE + '/api/log-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(e),
+  }).catch(() => {});
   return e;
 }
 
