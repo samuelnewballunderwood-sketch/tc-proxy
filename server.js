@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const http   = require('http');
 const PORT   = process.env.PORT || 3000;
+const autonomy = require('./autonomy');
 
 // ── HANNAH SYSTEM PROMPT ─────────────────────────────────────────────────
 // Updated: April 2026 — Trial 2, post-calibration, full bot registry
@@ -838,6 +839,29 @@ async function handleRequest(req, res) {
       if (!r.ok) throw new Error(JSON.stringify(result));
       res.end(JSON.stringify({ success: true, email_id: result.id }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ success: false, error: e.message })); }
+    return;
+  }
+
+  // ── Hannah Autonomy endpoints ──────────────────────────────────────
+  if (req.method === 'GET' && url === '/api/actions') {
+    const limit = new URL(req.url, 'http://x').searchParams.get('limit') || 50;
+    res.end(JSON.stringify({ actions: autonomy.getActions(limit) }));
+    return;
+  }
+  if (req.method === 'GET' && url === '/api/autonomy-status') {
+    res.end(JSON.stringify(autonomy.getStatus()));
+    return;
+  }
+  if (req.method === 'POST' && url === '/api/execute') {
+    try {
+      const body = await readBody(req);
+      const decision = JSON.parse(body);
+      const result = await autonomy.manualExecute(decision);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 

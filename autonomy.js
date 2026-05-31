@@ -1,0 +1,205 @@
+// ============================================================
+// Hannah Autonomy Loop
+// ============================================================
+// Reads decisions from the Cloudflare Worker, filters executable=true,
+// acts on them via the 3Commas API, logs results to an in-memory ring
+// buffer surfaced at /api/actions.
+//
+// SAFETY:
+//   - AUTONOMY_ENABLED=true must be set in Render env to act at all
+//   - AUTONOMY_DRY_RUN=true (default) only logs "would have done X"
+//   - AUTONOMY_MAX_PER_CYCLE caps mutations per tick (default 2)
+//   - AUTONOMY_KILL_SWITCH=true halts all action immediately
+//   - R8 enforcement: bots with active deals are never auto-disabled
+//   - Confidence floor: only acts when confidence >= AUTONOMY_MIN_CONFIDENCE (default 80)
+// ============================================================
+
+const crypto = require('crypto');
+
+const WORKER_BASE       = process.env.WORKER_BASE        || 'https://alphacontrol.ai';
+const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   === 'true';
+const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   !== 'false'; // default ON
+const AUTONOMY_KILL     = process.env.AUTONOMY_KILL_SWITCH === 'true';
+const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '2', 10);
+const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '80', 10);
+
+const TC_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
+const TC_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
+
+// Ring buffer of recent autonomy events — exposed at /api/actions
+const recentActions = [];
+let lastTickAt    = null;
+let lastTickError = null;
+
+const STATUS = {
+  enabled:       AUTONOMY_ENABLED,
+  dryRun:        AUTONOMY_DRY_RUN,
+  killSwitch:    AUTONOMY_KILL,
+  maxPerCycle:   AUTONOMY_MAX,
+  minConfidence: AUTONOMY_MIN_CONF,
+  workerBase:    WORKER_BASE,
+};
+
+function logEvent(entry) {
+  const e = { ts: new Date().toISOString(), ...entry };
+  recentActions.unshift(e);
+  if (recentActions.length > 200) recentActions.length = 200;
+  console.log('[autonomy]', JSON.stringify(e));
+  return e;
+}
+
+// ── 3Commas signed request ───────────────────────────────────────────
+function hmacSign(secret, path) {
+  return crypto.createHmac('sha256', secret).update(path).digest('hex');
+}
+
+async function tc3(method, path, qs) {
+  const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+  const sig = hmacSign(TC_SECRET, fullPath);
+  const r = await fetch('https://api.3commas.io' + fullPath, {
+    method,
+    headers: {
+      'Apikey': TC_KEY, 'Signature': sig,
+      'Accept': 'application/json', 'Content-Type': 'application/json',
+    },
+  });
+  const raw = await r.text();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (_) {}
+  return { status: r.status, body: parsed ?? raw };
+}
+
+// ── R8 protection: which bots have active deals? ─────────────────────
+async function getOpenDealBotIds() {
+  const ids = new Set();
+  for (const accId of ['33438577', '33439515']) {
+    const res = await tc3('GET', '/ver1/deals', `scope=active&limit=200&account_id=${accId}`);
+    if (res.status === 200 && Array.isArray(res.body)) {
+      res.body.forEach(d => d.bot_id && ids.add(d.bot_id));
+    }
+  }
+  return ids;
+}
+
+// ── Allowlist of auto-executable (actionType, objective) pairs ──────
+// Expand as more decision types prove safe.
+const ALLOWLIST = [
+  { actionType: 'reduce',     objective: 'idle_capital' },
+  { actionType: 'reallocate', objective: 'idle_capital' },
+  // future: { actionType: 'reduce', objective: 'bot_efficiency' } once trusted
+];
+
+function isAllowed(d) {
+  return ALLOWLIST.some(a =>
+    a.actionType === d.actionType && a.objective === d.objective);
+}
+
+// ── Execute one decision ─────────────────────────────────────────────
+async function executeDecision(decision, openDealBotIds) {
+  const results = [];
+  const targets = Array.isArray(decision.targetBotIds) ? decision.targetBotIds : [];
+  if (targets.length === 0) return [{ note: 'no targetBotIds — nothing to execute' }];
+
+  if (!isAllowed(decision)) {
+    return [{ note: `actionType=${decision.actionType} objective=${decision.objective} not in autonomy allowlist` }];
+  }
+
+  for (const botId of targets) {
+    // R8: bot has open deal → never auto-disable (deal must run to TP)
+    if (openDealBotIds.has(botId)) {
+      results.push({ botId, skipped: 'R8: bot has active deal' });
+      continue;
+    }
+    // Try DCA disable; on 404 fall back to grid disable.
+    let res = await tc3('POST', `/ver1/bots/${botId}/disable`);
+    if (res.status === 404 || (res.body && res.body.error === 'record_not_found')) {
+      res = await tc3('POST', `/ver1/grid_bots/${botId}/disable`);
+    }
+    results.push({ botId, status: res.status, body: res.body });
+  }
+  return results;
+}
+
+// ── Adaptive cadence by regime ───────────────────────────────────────
+async function nextDelayMs() {
+  try {
+    const r = await fetch(WORKER_BASE + '/api/portfolio');
+    const j = await r.json();
+    const regime = (j?.market?.regime || '').toLowerCase();
+    if (regime.includes('bear')) return  60 * 1000;        // 1 min — high vigilance
+    if (regime.includes('bull')) return 15 * 60 * 1000;    // 15 min — low frequency
+    return 5 * 60 * 1000;                                  // 5 min default
+  } catch (_) {
+    return 5 * 60 * 1000;
+  }
+}
+
+// ── One tick ─────────────────────────────────────────────────────────
+async function tick() {
+  lastTickAt = new Date().toISOString();
+  try {
+    if (AUTONOMY_KILL)     { logEvent({ event: 'kill_switch_active' }); return; }
+    if (!AUTONOMY_ENABLED) { return; }
+    if (!TC_KEY || !TC_SECRET) {
+      logEvent({ event: 'config_error', detail: 'TC_KEY / TC_SECRET missing' });
+      return;
+    }
+
+    const dRes = await fetch(WORKER_BASE + '/api/decisions');
+    if (!dRes.ok) {
+      logEvent({ event: 'fetch_decisions_failed', status: dRes.status });
+      return;
+    }
+    const { decisions = [] } = await dRes.json();
+
+    const candidates = decisions.filter(d =>
+      d.executable === true && (d.confidence ?? 0) >= AUTONOMY_MIN_CONF);
+    if (candidates.length === 0) return;
+
+    const openDeals = await getOpenDealBotIds();
+    let acted = 0;
+
+    for (const d of candidates) {
+      if (acted >= AUTONOMY_MAX) {
+        logEvent({ event: 'cap_reached', skipped: { actionType: d.actionType, objective: d.objective } });
+        break;
+      }
+      if (AUTONOMY_DRY_RUN) {
+        logEvent({ event: 'dry_run', decision: d });
+      } else {
+        const results = await executeDecision(d, openDeals);
+        logEvent({ event: 'executed', decision: d, results });
+      }
+      acted++;
+    }
+    lastTickError = null;
+  } catch (e) {
+    lastTickError = String(e);
+    logEvent({ event: 'tick_error', error: String(e) });
+  } finally {
+    const ms = await nextDelayMs();
+    setTimeout(tick, ms);
+  }
+}
+
+// ── Public API exposed via server.js ────────────────────────────────
+function getActions(limit) {
+  const n = parseInt(limit || '50', 10);
+  return recentActions.slice(0, Math.max(1, Math.min(200, n)));
+}
+function getStatus() {
+  return { ...STATUS, lastTickAt, lastTickError, recentCount: recentActions.length };
+}
+async function manualExecute(decision) {
+  if (AUTONOMY_KILL)           return { error: 'kill_switch_active' };
+  if (!TC_KEY || !TC_SECRET)   return { error: 'tc_credentials_missing' };
+  const openDeals = await getOpenDealBotIds();
+  const results = await executeDecision(decision, openDeals);
+  logEvent({ event: 'manual_execute', decision, results });
+  return { results };
+}
+
+// ── Boot the loop (10s delay so server.js finishes init first) ──────
+setTimeout(tick, 10_000);
+
+module.exports = { getActions, getStatus, manualExecute };
