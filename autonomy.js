@@ -110,6 +110,16 @@ async function executeDecision(decision, openDealBotIds) {
     if (Date.now() - _lastGridCreatedAt < GRID_CREATE_COOLDOWN_MS) {
       return [{ skipped: 'R9 cooldown — grid created in last 24h' }];
     }
+    // Dedupe: skip if any Hannah-created grid already exists (active or not)
+    try {
+      const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
+      const botsJ = botsR.ok ? await botsR.json() : { bots: [] };
+      const hannahGrid = (botsJ.bots || []).find(b =>
+        b.botType === 'grid' && /Hannah/i.test(b.name || ''));
+      if (hannahGrid) {
+        return [{ skipped: 'R9 dedupe — Hannah grid already exists', botId: hannahGrid.id, name: hannahGrid.name }];
+      }
+    } catch (_) {}
     // Pull current BTC price for range calc
     let btcPrice = 0;
     try {

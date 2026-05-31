@@ -948,7 +948,23 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: '3Commas rejected', status: r.status, body: data, payload }));
         return;
       }
-      res.end(JSON.stringify({ success: true, gridBot: data, payload }));
+      // Auto-enable the bot so it actually trades (otherwise it sits is_enabled:false)
+      let enabled = null;
+      try {
+        if (data?.id) {
+          const ePath = `/public/api/ver1/grid_bots/${data.id}/enable`;
+          const eSig = hmacSign(TC_API_SECRET, ePath);
+          const eR = await fetch('https://api.3commas.io' + ePath, {
+            method: 'POST',
+            headers: { 'Apikey': TC_API_KEY, 'Signature': eSig,
+                       'Content-Type': 'application/json', 'Accept': 'application/json' },
+          });
+          const eRaw = await eR.text();
+          let eData; try { eData = JSON.parse(eRaw); } catch { eData = eRaw; }
+          enabled = { ok: eR.ok, status: eR.status, body: eData };
+        }
+      } catch (e) { enabled = { ok: false, error: e.message }; }
+      res.end(JSON.stringify({ success: true, gridBot: data, enabled, payload }));
     } catch (e) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message }));
