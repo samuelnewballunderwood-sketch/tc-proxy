@@ -919,7 +919,7 @@ async function handleRequest(req, res) {
       // ── Convert per-grid USDT → BASE currency amount (3Commas wants BASE)
       const midPrice = (upper + lower) / 2;
       const usdtPerGrid = totalQuote / grids;
-      const baseQtyPerGrid = +(usdtPerGrid / midPrice).toFixed(8);
+      const baseQtyPerGrid = Math.round((usdtPerGrid / midPrice) * 100000) / 100000;
       const fullPath = '/public/api/ver1/grid_bots/manual';
       const payload = {
         account_id: accountId,
