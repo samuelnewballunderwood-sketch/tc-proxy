@@ -89,7 +89,12 @@ const ALLOWLIST = [
   { actionType: 'reallocate', objective: 'idle_capital'  },
   { actionType: 'reduce',     objective: 'bot_efficiency'},  // R3/R4 underperformer close
   { actionType: 'enable',     objective: 'regime_lift'   },  // R2-LIFT: auto-resume DCAs when F&G recovers
+  { actionType: 'deploy_grid', objective: 'idle_capital_deploy' }, // R9: auto-deploy idle USDT to BTC defensive grid
 ];
+
+// Track the last auto-grid creation to enforce daily cap
+let _lastGridCreatedAt = 0;
+const GRID_CREATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 function isAllowed(d) {
   return ALLOWLIST.some(a =>
@@ -99,6 +104,47 @@ function isAllowed(d) {
 // ── Execute one decision ─────────────────────────────────────────────
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
+
+  // Special path: deploy_grid (R9) creates a NEW bot — no targetBotIds.
+  if (decision.actionType === 'deploy_grid' && decision.objective === 'idle_capital_deploy') {
+    if (Date.now() - _lastGridCreatedAt < GRID_CREATE_COOLDOWN_MS) {
+      return [{ skipped: 'R9 cooldown — grid created in last 24h' }];
+    }
+    // Pull current BTC price for range calc
+    let btcPrice = 0;
+    try {
+      const pr = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/prices').catch(() => null);
+      if (pr && pr.ok) { const pj = await pr.json(); btcPrice = parseFloat(pj.BTC || pj.BTCUSDT || 0); }
+    } catch (_) {}
+    if (btcPrice <= 0) {
+      const pr2 = await fetch('https://tc-proxy-eu.onrender.com/prices');
+      const pj2 = await pr2.json();
+      btcPrice = parseFloat(pj2.BTC || pj2.BTCUSDT || 0);
+    }
+    if (btcPrice <= 0) return [{ error: 'cannot resolve BTC price for grid range' }];
+
+    const totalQuote = Math.max(100, Math.min(2000, Math.round(decision.amount || 1000)));
+    const upper = +(btcPrice * 1.10).toFixed(2);
+    const lower = +(btcPrice * 0.90).toFixed(2);
+    const spec = {
+      pair: 'USDT_BTC',
+      upperPrice: upper,
+      lowerPrice: lower,
+      gridQuantity: 30,
+      totalQuoteAmount: totalQuote,
+      accountId: 33438577,
+      name: 'Hannah-Auto-BTC-Defensive-' + new Date().toISOString().slice(0,10),
+    };
+    const cr = await fetch('https://tc-proxy-eu.onrender.com/api/create-grid', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(spec),
+    });
+    const cjRaw = await cr.text();
+    let cj; try { cj = JSON.parse(cjRaw); } catch { cj = cjRaw; }
+    if (cr.ok) _lastGridCreatedAt = Date.now();
+    return [{ created: cr.ok, status: cr.status, response: cj, spec }];
+  }
+
   const targets = Array.isArray(decision.targetBotIds) ? decision.targetBotIds : [];
   if (targets.length === 0) return [{ note: 'no targetBotIds — nothing to execute' }];
 

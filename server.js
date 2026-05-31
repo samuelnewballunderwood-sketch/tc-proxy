@@ -869,6 +869,87 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Grid bot creation (3Commas manual grid) ─────────────────────
+  if (req.method === 'POST' && url === '/api/create-grid') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      // Required: pair, upperPrice, lowerPrice, gridQuantity, totalQuoteAmount
+      // Optional: accountId (defaults to Binance Spot 33438577)
+      const accountId = body.accountId || 33438577;
+      const pair = body.pair;                      // e.g. "USDT_BTC"
+      const upper = parseFloat(body.upperPrice);
+      const lower = parseFloat(body.lowerPrice);
+      const grids = parseInt(body.gridQuantity || 30, 10);
+      const totalQuote = parseFloat(body.totalQuoteAmount); // in USDT
+      // ── Sanity guards ───────────────────────────────────────────
+      if (!pair || !upper || !lower || !totalQuote) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'missing required: pair, upperPrice, lowerPrice, totalQuoteAmount' }));
+        return;
+      }
+      if (lower <= 0 || upper <= lower) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'invalid range — upper must be > lower > 0' }));
+        return;
+      }
+      const rangePct = ((upper - lower) / lower) * 100;
+      if (rangePct < 3 || rangePct > 40) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'range out of safety band — must be 3–40%, got ' + rangePct.toFixed(1) + '%' }));
+        return;
+      }
+      if (totalQuote < 100 || totalQuote > 5000) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'investment out of safety band — must be $100–$5000, got $' + totalQuote }));
+        return;
+      }
+      if (grids < 5 || grids > 100) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'grid count out of band — must be 5–100' }));
+        return;
+      }
+      // ── 3Commas signed POST ─────────────────────────────────────
+      const TC_API_KEY    = process.env.TC_KEY    || process.env.TC_API_KEY    || '';
+      const TC_API_SECRET = process.env.TC_SECRET || process.env.TC_API_SECRET || '';
+      if (!TC_API_KEY || !TC_API_SECRET) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: 'TC keys not configured' }));
+        return;
+      }
+      const fullPath = '/public/api/ver1/grid_bots/manual';
+      const payload = {
+        account_id: accountId,
+        pair,
+        upper_price: upper,
+        lower_price: lower,
+        grids_quantity: grids,
+        quantity_per_grid: +(totalQuote / grids).toFixed(8), // USDT per cell
+        name: body.name || ('Hannah-Auto-' + pair + '-' + Date.now()),
+      };
+      const sig = hmacSign(TC_API_SECRET, fullPath + JSON.stringify(payload));
+      const r = await fetch('https://api.3commas.io' + fullPath, {
+        method: 'POST',
+        headers: {
+          'Apikey': TC_API_KEY, 'Signature': sig,
+          'Content-Type': 'application/json', 'Accept': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const raw = await r.text();
+      let data; try { data = JSON.parse(raw); } catch { data = raw; }
+      if (!r.ok) {
+        res.statusCode = r.status;
+        res.end(JSON.stringify({ error: '3Commas rejected', status: r.status, body: data, payload }));
+        return;
+      }
+      res.end(JSON.stringify({ success: true, gridBot: data, payload }));
+    } catch (e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   // ── Hannah Autonomy endpoints ──────────────────────────────────────
   if (req.method === 'GET' && url === '/api/actions') {
     const limit = new URL(req.url, 'http://x').searchParams.get('limit') || 50;
