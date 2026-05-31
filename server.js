@@ -440,6 +440,7 @@ async function handleRequest(req, res) {
           2761423: 991,   // ETH spot grid $991
           2761412: 1000,  // BTC spot grid $1,000
           // 2761473 BTC futures quarterly — investment varies, use API value
+          2779981: 1700, // Hannah-Auto BTC defensive grid (R9, 2026-05-31)
         };
         const knownCap = KNOWN_GRID_CAPITAL[b.id];
         const apiCap = parseFloat(b.investment_quote_currency || 0);
