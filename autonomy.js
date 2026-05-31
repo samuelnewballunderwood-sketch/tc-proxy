@@ -90,6 +90,7 @@ const ALLOWLIST = [
   { actionType: 'reduce',     objective: 'bot_efficiency'},  // R3/R4 underperformer close
   { actionType: 'enable',     objective: 'regime_lift'   },  // R2-LIFT: auto-resume DCAs when F&G recovers
   { actionType: 'deploy_grid', objective: 'idle_capital_deploy' }, // R9: auto-deploy idle USDT to BTC defensive grid
+  { actionType: 'deploy_grid', objective: 'idle_crypto_grid'    }, // R12: per-asset grid for held crypto
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -105,45 +106,46 @@ function isAllowed(d) {
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
 
-  // Special path: deploy_grid (R9) creates a NEW bot — no targetBotIds.
-  if (decision.actionType === 'deploy_grid' && decision.objective === 'idle_capital_deploy') {
-    if (Date.now() - _lastGridCreatedAt < GRID_CREATE_COOLDOWN_MS) {
-      return [{ skipped: 'R9 cooldown — grid created in last 24h' }];
-    }
-    // Dedupe: skip if any Hannah-created grid already exists (active or not)
+  // Special path: deploy_grid creates a NEW bot — no targetBotIds.
+  if (decision.actionType === 'deploy_grid') {
+    // Pair selection from decision payload (R12 supplies suggestedPair / suggestedAsset)
+    // Fallback to BTC if not specified (R9 backward compat).
+    const pair = decision.suggestedPair || 'USDT_BTC';
+    const asset = decision.suggestedAsset || (pair.split('_')[1] || 'BTC');
+
+    // Dedupe: skip if a Hannah grid for THIS asset already exists
     try {
       const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
       const botsJ = botsR.ok ? await botsR.json() : { bots: [] };
       const hannahGrid = (botsJ.bots || []).find(b =>
-        b.botType === 'grid' && /Hannah/i.test(b.name || ''));
+        b.botType === 'grid' && /Hannah/i.test(b.name || '') &&
+        (b.pair || '').toUpperCase().includes(asset.toUpperCase()));
       if (hannahGrid) {
-        return [{ skipped: 'R9 dedupe — Hannah grid already exists', botId: hannahGrid.id, name: hannahGrid.name }];
+        return [{ skipped: `dedupe — Hannah ${asset} grid already exists`, botId: hannahGrid.id, name: hannahGrid.name }];
       }
     } catch (_) {}
-    // Pull current BTC price for range calc
-    let btcPrice = 0;
-    try {
-      const pr = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/prices').catch(() => null);
-      if (pr && pr.ok) { const pj = await pr.json(); btcPrice = parseFloat(pj.BTC || pj.BTCUSDT || 0); }
-    } catch (_) {}
-    if (btcPrice <= 0) {
-      const pr2 = await fetch('https://tc-proxy-eu.onrender.com/prices');
-      const pj2 = await pr2.json();
-      btcPrice = parseFloat(pj2.BTC || pj2.BTCUSDT || 0);
-    }
-    if (btcPrice <= 0) return [{ error: 'cannot resolve BTC price for grid range' }];
 
-    const totalQuote = Math.max(100, Math.min(2000, Math.round(decision.amount || 1000)));
-    const upper = +(btcPrice * 1.10).toFixed(2);
-    const lower = +(btcPrice * 0.90).toFixed(2);
+    // Resolve price
+    let price = 0;
+    try {
+      const pr = await fetch('https://tc-proxy-eu.onrender.com/prices');
+      const pj = await pr.json();
+      price = parseFloat(pj[asset] || pj[asset + 'USDT'] || 0);
+    } catch (_) {}
+    if (price <= 0) return [{ error: 'cannot resolve ' + asset + ' price for grid range' }];
+
+    const totalQuote = Math.max(100, Math.min(2000, Math.round(decision.amount || 500)));
+    const decimals = price < 1 ? 5 : price < 100 ? 4 : 2;
+    const upper = +(price * 1.10).toFixed(decimals);
+    const lower = +(price * 0.90).toFixed(decimals);
     const spec = {
-      pair: 'USDT_BTC',
+      pair,
       upperPrice: upper,
       lowerPrice: lower,
       gridQuantity: 30,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
-      name: 'Hannah-BTC-' + new Date().toISOString().slice(0,10),
+      name: 'Hannah-' + asset + '-' + new Date().toISOString().slice(0,10),
     };
     const cr = await fetch('https://tc-proxy-eu.onrender.com/api/create-grid', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
