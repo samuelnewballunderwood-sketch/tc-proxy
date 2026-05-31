@@ -218,6 +218,21 @@ async function tick() {
     }
     const { decisions = [] } = await dRes.json();
 
+    // PHASE 2: write today's locked profit snapshot if not already done
+    try {
+      const snapR = await fetch(WORKER_BASE + '/api/daily-snapshot');
+      const snapJ = snapR.ok ? await snapR.json() : null;
+      if (!snapJ?.today?.locked) {
+        const recon = decisions && (await (await fetch(WORKER_BASE + '/api/decisions')).json()).reconciliation;
+        const currentLocked = recon?.totalRealised ?? 0;
+        await fetch(WORKER_BASE + '/api/daily-snapshot', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ locked: currentLocked }),
+        });
+        logEvent({ event: 'daily_snapshot_written', locked: currentLocked });
+      }
+    } catch (_) {}
+
     const candidates = decisions.filter(d =>
       d.executable === true && (d.confidence ?? 0) >= AUTONOMY_MIN_CONF);
     if (candidates.length === 0) return;
