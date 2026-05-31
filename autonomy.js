@@ -88,6 +88,7 @@ const ALLOWLIST = [
   { actionType: 'reduce',     objective: 'idle_capital'  },  // idle bot capital recovery
   { actionType: 'reallocate', objective: 'idle_capital'  },
   { actionType: 'reduce',     objective: 'bot_efficiency'},  // R3/R4 underperformer close
+  { actionType: 'enable',     objective: 'regime_lift'   },  // R2-LIFT: auto-resume DCAs when F&G recovers
 ];
 
 function isAllowed(d) {
@@ -111,10 +112,11 @@ async function executeDecision(decision, openDealBotIds) {
       results.push({ botId, skipped: 'R8: bot has active deal' });
       continue;
     }
-    // Try DCA disable; on 404 fall back to grid disable.
-    let res = await tc3('POST', `/ver1/bots/${botId}/disable`);
+    // Choose endpoint by actionType: enable vs disable (default).
+    const verb = decision.actionType === 'enable' ? 'enable' : 'disable';
+    let res = await tc3('POST', `/ver1/bots/${botId}/${verb}`);
     if (res.status === 404 || (res.body && res.body.error === 'record_not_found')) {
-      res = await tc3('POST', `/ver1/grid_bots/${botId}/disable`);
+      res = await tc3('POST', `/ver1/grid_bots/${botId}/${verb}`);
     }
     results.push({ botId, status: res.status, body: res.body });
   }
