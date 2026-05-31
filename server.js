@@ -876,6 +876,68 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── System optimisation score (/10) ──────────────────────────────
+  if (req.method === 'GET' && url === '/api/system-score') {
+    try {
+      const [perf, sw, dec] = await Promise.all([
+        fetch('http://localhost:'+(process.env.PORT||3000)+'/bots').then(r=>r.json()).catch(()=>null),
+        fetch('http://localhost:'+(process.env.PORT||3000)+'/spot-wallet').then(r=>r.json()).catch(()=>null),
+        fetch('https://alphacontrol.ai/api/decisions').then(r=>r.json()).catch(()=>null),
+      ]);
+      const bots = (perf?.bots) || [];
+      const hannahBots = bots.filter(b => /Hannah/i.test(b.name||''));
+      const activeHannah = hannahBots.filter(b => b.active);
+      const usdtBal = (sw?.balances || []).find(b => b.asset === 'USDT');
+      const usdtFree = parseFloat(usdtBal?.free || 0);
+      const usdtLocked = parseFloat(usdtBal?.locked || 0);
+      const grandTotal = dec?.reconciliation?.grandTotal || 0;
+      const deployed = activeHannah.reduce((s,b)=>s + (parseFloat(b.capital)||0), 0);
+      const riskScore = dec?.riskScore || 0;
+      const riskState = dec?.riskState || 'UNKNOWN';
+      const blockedDecs = (dec?.decisions||[]).filter(d => d.objective==='blocked_by_earn').length;
+
+      // Weighted dimensions
+      const deploymentPct = grandTotal > 0 ? deployed / grandTotal * 100 : 0;
+      const dimDeployment = Math.min(10, deploymentPct / 5);            // 50% deployed = 10/10
+      const dimBotCount   = Math.min(10, activeHannah.length * 2);       // 5+ active bots = 10/10
+      const dimRiskHealth = riskState === 'BALANCED' ? 8 :
+                            riskState === 'SAFE'     ? 10 :
+                            riskState === 'OVEREXPOSED' ? 4 :
+                            riskState === 'HIGH_RISK'   ? 2 : 5;
+      const dimCashEff    = (() => {
+        const totalUsdt = usdtFree + usdtLocked;
+        if (totalUsdt < 50) return 5;
+        // Want free to be small relative to total (locked means working in grids)
+        return Math.min(10, 10 - (usdtFree / totalUsdt) * 8);
+      })();
+      const dimRulesFiring = Math.min(10, (dec?.decisions||[]).length);  // 10+ rules firing = 10/10
+      const dimBlockerHandling = blockedDecs > 0 ? 8 : 10;                // surfacing blockers = 8/10
+
+      const weights = { dep:3, bot:1.5, risk:2, cash:2, rules:1, block:0.5 };
+      const total = (
+        dimDeployment*weights.dep + dimBotCount*weights.bot + dimRiskHealth*weights.risk +
+        dimCashEff*weights.cash + dimRulesFiring*weights.rules + dimBlockerHandling*weights.block
+      ) / Object.values(weights).reduce((s,n)=>s+n,0);
+
+      res.end(JSON.stringify({
+        score: +total.toFixed(1),
+        breakdown: {
+          deployment: { score: +dimDeployment.toFixed(1), pct: +deploymentPct.toFixed(1), deployed, target: '50%+ for 10/10' },
+          activeBots: { score: +dimBotCount.toFixed(1), count: activeHannah.length, target: '5+ for 10/10' },
+          riskHealth: { score: dimRiskHealth, state: riskState },
+          cashEfficiency: { score: +dimCashEff.toFixed(1), free: usdtFree, locked: usdtLocked },
+          rulesFiring: { score: +dimRulesFiring.toFixed(1), count: (dec?.decisions||[]).length },
+          blockerHandling: { score: dimBlockerHandling, blockedCount: blockedDecs },
+        },
+        verdict: total >= 8 ? 'Excellent — system running near optimum' :
+                 total >= 6 ? 'Good — solid baseline, some deployment headroom' :
+                 total >= 4 ? 'Moderate — capital deployment low, unlock to improve' :
+                              'Suboptimal — significant idle capital, unstake from Earn',
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Learning loop v1: aggregates the persistent action log ──
   if (req.method === 'GET' && url === '/api/learning') {
     try {
