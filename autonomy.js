@@ -103,6 +103,24 @@ let _lastGridCreatedAt = 0;
 const GRID_CREATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // In-flight create lock — prevents concurrent ticks from creating dupes per asset
 const _gridCreateInFlight = new Set();
+// Per (objective+asset) failed-attempt tracker — silences repeat-skip noise
+const _failedAttempts = new Map(); // key -> { count, firstTs }
+const FAIL_CAP = 3;
+const FAIL_WINDOW_MS = 4 * 60 * 60 * 1000; // 4h cooldown after 3 fails
+function _failKey(d) { return (d.objective||'') + ':' + (d.suggestedAsset || d.targetBotIds?.[0] || ''); }
+function _isInFailCooldown(d) {
+  const key = _failKey(d);
+  const rec = _failedAttempts.get(key);
+  if (!rec) return false;
+  if (Date.now() - rec.firstTs > FAIL_WINDOW_MS) { _failedAttempts.delete(key); return false; }
+  return rec.count >= FAIL_CAP;
+}
+function _recordFail(d) {
+  const key = _failKey(d);
+  const rec = _failedAttempts.get(key) || { count: 0, firstTs: Date.now() };
+  rec.count++;
+  _failedAttempts.set(key, rec);
+}
 
 function isAllowed(d) {
   return ALLOWLIST.some(a =>
@@ -253,6 +271,9 @@ async function tick() {
     let acted = 0;
 
     for (const d of candidates) {
+      if (_isInFailCooldown(d)) {
+        continue; // silently skip — 3+ failures in last 4h
+      }
       if (acted >= AUTONOMY_MAX) {
         logEvent({ event: 'cap_reached', skipped: { actionType: d.actionType, objective: d.objective } });
         break;
@@ -261,6 +282,10 @@ async function tick() {
         logEvent({ event: 'dry_run', decision: d });
       } else {
         const results = await executeDecision(d, openDeals);
+        // Track failures for cooldown
+        if (results?.[0]?.error || results?.[0]?.skipped || results?.[0]?.created === false) {
+          _recordFail(d);
+        }
         logEvent({ event: 'executed', decision: d, results });
       }
       acted++;

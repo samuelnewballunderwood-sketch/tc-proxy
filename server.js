@@ -1017,6 +1017,50 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── DELETE a grid bot via 3Commas ─────────────────────────────────
+  if (req.method === 'POST' && url.match(/^\/api\/grid-bot\/\d+\/delete$/)) {
+    try {
+      const id = url.split('/')[3];
+      const fullPath = `/public/api/ver1/grid_bots/${id}`;
+      const sig = hmacSign(TC_SECRET, fullPath);
+      const r = await fetch('https://api.3commas.io' + fullPath, {
+        method: 'DELETE',
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' },
+      });
+      const raw = await r.text();
+      let data; try { data = JSON.parse(raw); } catch { data = raw; }
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ deleted: r.ok, id, body: data }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── Bulk cleanup of inactive Hannah ghost bots ────────────────────
+  if (req.method === 'POST' && url === '/api/cleanup-ghost-hannah-bots') {
+    try {
+      const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
+      const bots = await botsR.json();
+      const ghosts = (bots.bots || []).filter(b =>
+        /Hannah/i.test(b.name||'') && !b.active && (parseFloat(b.capital)||0) === 0);
+      const results = [];
+      for (const g of ghosts) {
+        const fullPath = `/public/api/ver1/grid_bots/${g.id}`;
+        const sig = hmacSign(TC_SECRET, fullPath);
+        try {
+          const r = await fetch('https://api.3commas.io' + fullPath, {
+            method: 'DELETE',
+            headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' },
+          });
+          results.push({ id: g.id, name: g.name, deleted: r.ok, status: r.status });
+        } catch(e) {
+          results.push({ id: g.id, name: g.name, error: e.message });
+        }
+      }
+      res.end(JSON.stringify({ count: ghosts.length, results }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Grid bot creation (3Commas manual grid) ─────────────────────
   if (req.method === 'POST' && url === '/api/create-grid') {
     try {
