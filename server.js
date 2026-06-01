@@ -979,6 +979,73 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Monthly performance — calendar-month-accurate MTD + prev month ─
+  if (req.method === 'GET' && url === '/api/monthly-performance') {
+    try {
+      // Fetch all completed deals from 3Commas for both accounts (deals/detail already aggregates by bot, we need by-month)
+      const TC_API_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
+      const TC_API_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
+      if (!TC_API_KEY || !TC_API_SECRET) { res.statusCode=500; res.end(JSON.stringify({error:'TC creds missing'})); return; }
+      async function tc3Fetch(path, qs) {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_API_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_API_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' }
+        });
+        if (r.status === 204) return [];
+        const raw = await r.text();
+        try { return JSON.parse(raw); } catch { return []; }
+      }
+      const [dealsSpot, dealsFut] = await Promise.all([
+        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33438577').catch(()=>[]),
+        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33439515').catch(()=>[]),
+      ]);
+      const deals = [...(Array.isArray(dealsSpot)?dealsSpot:[]), ...(Array.isArray(dealsFut)?dealsFut:[])];
+      // Bucket by YYYY-MM closed_at
+      const byMonth = {};
+      for (const d of deals) {
+        if (!d.closed_at) continue;
+        const dt = new Date(d.closed_at);
+        const key = dt.getUTCFullYear() + '-' + String(dt.getUTCMonth()+1).padStart(2,'0');
+        byMonth[key] = byMonth[key] || { dealCount: 0, dealProfit: 0 };
+        byMonth[key].dealCount++;
+        byMonth[key].dealProfit += parseFloat(d.final_profit || 0);
+      }
+      // Get total portfolio for % calc
+      const reconR = await fetch('https://alphacontrol.ai/api/decisions').then(r => r.ok ? r.json() : null).catch(()=>null);
+      const capital = parseFloat(reconR?.reconciliation?.grandTotal || 0);
+      const now = new Date();
+      const ym = (d) => d.getUTCFullYear() + '-' + String(d.getUTCMonth()+1).padStart(2,'0');
+      const thisMonth = ym(now);
+      const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-1, 1));
+      const prevMonth = ym(prev);
+      const twoPrev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-2, 1));
+      const twoPrevMonth = ym(twoPrev);
+      const monthName = (key) => {
+        const [y, m] = key.split('-');
+        return new Date(Date.UTC(+y, +m-1, 1)).toLocaleString('en-GB',{month:'long', year:'numeric'});
+      };
+      const wrap = (key) => {
+        const d = byMonth[key] || { dealCount: 0, dealProfit: 0 };
+        return {
+          month: key,
+          label: monthName(key),
+          locked: +d.dealProfit.toFixed(2),
+          dealCount: d.dealCount,
+          pctOfCapital: capital > 0 ? +((d.dealProfit/capital)*100).toFixed(2) : 0,
+        };
+      };
+      res.end(JSON.stringify({
+        capital,
+        currentMonth: wrap(thisMonth),
+        previousMonth: wrap(prevMonth),
+        twoMonthsAgo: wrap(twoPrev),
+        allMonths: Object.keys(byMonth).sort().map(wrap),
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── R23: Per-rule P&L attribution ─────────────────────────────
   if (req.method === 'GET' && url === '/api/rule-performance') {
     try {
