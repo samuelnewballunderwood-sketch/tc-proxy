@@ -99,6 +99,8 @@ const ALLOWLIST = [
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
   { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
   { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
+  { actionType: 'spot_buy',    objective: 'fear_accumulate'   }, // R17: F&G extreme accumulation
+  { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -109,6 +111,14 @@ const _gridCreateInFlight = new Set();
 const _r16ProcessedAlertIds = new Set(); // session memory of acted-on alert timestamps
 let _r16DailyCount = 0;
 let _r16DayKey = '';
+let _r17DailyCount = 0;
+let _r17DayKey = '';
+function _r17CheckCap() {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _r17DayKey) { _r17DayKey = day; _r17DailyCount = 0; }
+  return _r17DailyCount < 1;
+}
+function _r17Increment() { _r17DailyCount++; }
 function _r16CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r16DayKey) { _r16DayKey = day; _r16DailyCount = 0; }
@@ -142,6 +152,41 @@ function isAllowed(d) {
 // ── Execute one decision ─────────────────────────────────────────────
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
+
+  // Special path: spot_buy (R17) — F&G extreme accumulation
+  if (decision.actionType === 'spot_buy' && decision.objective === 'fear_accumulate') {
+    if (!_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (1/day)' }];
+    const pair = decision.suggestedPair || 'USDT_BTC';
+    const amount = parseFloat(decision.amount || 50);
+    try {
+      const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pair, direction: 'buy', quoteAmount: amount,
+          takeProfitPct: 5,  // wider TP — this is accumulation, not scalp
+          stopLossPct: 5,
+          strategy: 'R17_fear_accumulate',
+        }),
+      });
+      const body = await r.json();
+      if (r.ok) _r17Increment();
+      return [{ smartTradeCreated: r.ok, status: r.status, amount, response: body }];
+    } catch(e) { return [{ error: e.message }]; }
+  }
+
+  // Special path: close_grid (R19) — profit-take Hannah grid
+  if (decision.actionType === 'close_grid' && decision.objective === 'grid_profit_take') {
+    const targets = decision.targetBotIds || [];
+    const results = [];
+    for (const id of targets) {
+      try {
+        const r = await fetch(`https://tc-proxy-eu.onrender.com/grid-bot/${id}/disable`, { method: 'POST' });
+        const body = await r.json();
+        results.push({ botId: id, closed: r.ok, body });
+      } catch(e) { results.push({ botId: id, error: e.message }); }
+    }
+    return results;
+  }
 
   // Special path: tv_signal (R16) — act on TradingView Bj Bot alert
   if (decision.actionType === 'tv_signal' && decision.objective === 'tv_signal_act') {
