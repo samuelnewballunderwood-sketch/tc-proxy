@@ -1017,6 +1017,31 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Bulk-disable the CLAUDE.md PERMANENTLY STOPPED bot IDs ────
+  if (req.method === 'POST' && url === '/api/disable-permanent-stop-bots') {
+    const STOP_LIST = [
+      16801943, // BTC LONG FUTURES BOT
+      16801248, // BTC HEDGE BOT
+      16812326, // SOL SHORT HEDGE BOT
+      16809699, // ETH HEDGE BOT
+      // BNB SHORT HEDGE / USDT STABLE COIN ENGINE — add IDs if surface
+    ];
+    const results = [];
+    for (const id of STOP_LIST) {
+      const fullPath = `/public/api/ver1/bots/${id}/disable`;
+      const sig = hmacSign(TC_SECRET, fullPath);
+      try {
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          method: 'POST',
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' },
+        });
+        results.push({ id, disabled: r.ok, status: r.status });
+      } catch(e) { results.push({ id, error: e.message }); }
+    }
+    res.end(JSON.stringify({ count: STOP_LIST.length, results }));
+    return;
+  }
+
   // ── DELETE a grid bot via 3Commas ─────────────────────────────────
   if (req.method === 'POST' && url.match(/^\/api\/grid-bot\/\d+\/delete$/)) {
     try {
