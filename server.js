@@ -1191,16 +1191,16 @@ async function handleRequest(req, res) {
       const dcaArr = Array.isArray(dca) ? dca : [];
       const gridArr = Array.isArray(grid) ? grid : [];
       // Match 3Commas UI exactly:
-      //   DCA: API returns 10 current bots (no archived). active = is_enabled true.
-      //        Stuck open deals don't count as 'active' — they're paused mid-flight.
-      //   Grid: API returns ALL grids including archived. UI shows only enabled.
-      //        So total + active are both: is_enabled === true.
-      //   Signal: hardcoded 4/4 (Sam's 3Commas check 2026-06-01) — public API doesn't expose.
+      //   A bot is 'ON' in 3Commas UI if: is_enabled === true OR has an active deal.
+      //   (Active deal runs to TP/SL even after is_enabled=false — UI shows it as ON until closed.)
+      //   DCA: API returns 10 current bots (no archived).
+      //   Grid: API returns ALL grids including archived; filter to enabled OR with active deal.
+      const isLive = b => (b.is_enabled === true) || ((b.active_deals_count || 0) > 0) || ((b.active_deals || []).length > 0);
       const dcaTotal = dcaArr.length;
-      const dcaActive = dcaArr.filter(b => b.is_enabled === true).length;
-      const gridEnabled = gridArr.filter(b => b.is_enabled === true);
-      const gridTotal = gridEnabled.length;
-      const gridActive = gridEnabled.length;
+      const dcaActive = dcaArr.filter(isLive).length;
+      const gridLive = gridArr.filter(isLive);
+      const gridTotal = gridLive.length;
+      const gridActive = gridLive.length;
       // Signal bots: try v2 API. If that fails, null (not hardcoded).
       let signalTotal = null;
       let signalActive = null;
