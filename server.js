@@ -1102,44 +1102,6 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── TEMP: dump raw 3Commas DCA bot fields for one bot (find reinvested formula) ──
-  if (req.method === 'GET' && url === '/api/dca-raw-dump') {
-    try {
-      async function tcFetch(path, qs='') {
-        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
-        const sig = hmacSign(TC_SECRET, fullPath);
-        return fetch('https://api.3commas.io' + fullPath, {
-          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
-        }).then(r => r.json());
-      }
-      // Bot 16806276 = SOL/USDT DCA Long (the champion, $94.95 PnL + $164.01 Reinv expected)
-      const id = 16806276;
-      const [listResp, detail] = await Promise.all([
-        tcFetch('/ver1/bots', 'limit=200&include_events=false'),
-        tcFetch('/ver1/bots/' + id + '/show', 'include_events=false'),
-      ]);
-      const fromList = Array.isArray(listResp) ? listResp.find(b => b.id === id) : null;
-      res.end(JSON.stringify({
-        bot_id: id,
-        from_list_fields: fromList ? Object.keys(fromList).sort() : null,
-        from_detail_fields: detail ? Object.keys(detail).sort() : null,
-        from_list_sample: fromList ? {
-          base_order_volume: fromList.base_order_volume,
-          finished_deals_count: fromList.finished_deals_count,
-          finished_deals_profit_usd: fromList.finished_deals_profit_usd,
-          active_deals_usd_profit: fromList.active_deals_usd_profit,
-          profit_currency: fromList.profit_currency,
-          total_profits_in_usd: fromList.total_profits_in_usd,
-          additional_funds: fromList.additional_funds,
-          funds: fromList.funds,
-          // Add everything that looks profit/funds-related
-        } : null,
-        detail_sample: detail,
-      }, null, 2));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
-    return;
-  }
-
   // ── DCA bot detail (per-bot PnL + reinvested + ROI) ─────────────
   if (req.method === 'GET' && url === '/api/dca-detail') {
     try {
@@ -1153,26 +1115,17 @@ async function handleRequest(req, res) {
       const dcaBots = await tcFetch('/ver1/bots', 'limit=200');
       if (!Array.isArray(dcaBots)) throw new Error('3Commas returned non-array');
 
-      // REINVESTED_OVERRIDE: Sam's manual UI scrape values from 3Commas
-      // (3Commas public REST doesn't expose reinvested; these are accurate as of 2026-06-01)
-      // TODO: when 3Commas API exposes, remove these overrides
-      const REINVESTED_OVERRIDE = {
-        16806276: 164.01, // SOL/USDT DCA Long
-        16806296: 135.16, // ETH/USDT DCA Long
-        16807404:  53.76, // BTC/USDT DCA Long
-        16808289:  36.01, // XRP/USDT DCA Long
-        16812326:   2.35, // SOL SHORT HEDGE BOT
-        // Others: 0
-      };
-
       const out = dcaBots.map(b => {
         const baseOrderVol = parseFloat(b.base_order_volume || 0);
         const finishedDeals = parseInt(b.finished_deals_count || 0);
         // finished_deals_profit_usd = cash PnL (the 'PnL' column in 3Commas)
         const pnlUsd = parseFloat(b.finished_deals_profit_usd || 0);
-        // Reinvested: prefer manual override (accurate), fall back to 0
-        const reinvested = REINVESTED_OVERRIDE[b.id] != null ? REINVESTED_OVERRIDE[b.id] : 0;
-        const totalLocked = pnlUsd + reinvested;
+        // Reinvested: ONLY from API field reinvested_volume_usd.
+        // 3Commas public REST doesn't always populate this — null means we don't know.
+        // (UI computes it server-side via internal wapi we can't access.)
+        const reinvestedRaw = b.reinvested_volume_usd;
+        const reinvested = reinvestedRaw != null ? parseFloat(reinvestedRaw) : null;
+        const totalLocked = reinvested != null ? pnlUsd + reinvested : pnlUsd;
         const avgDaily = finishedDeals > 0 ? pnlUsd / Math.max(1, (Date.now() - new Date(b.created_at).getTime()) / (24*60*60*1000)) : 0;
         const exchange = b.account_id === 33439515 ? 'Binance Futures' : 'Binance Spot';
         return {
@@ -1185,27 +1138,33 @@ async function handleRequest(req, res) {
           finishedDeals,
           baseOrderVol,
           exchange,
+          reinvestingPct: parseFloat(b.reinvesting_percentage || 0),
           pnlUsd: Math.round(pnlUsd * 100) / 100,
           avgDaily: Math.round(avgDaily * 100) / 100,
-          reinvested,
+          reinvested: reinvested != null ? Math.round(reinvested * 100) / 100 : null,
           totalLocked: Math.round(totalLocked * 100) / 100,
         };
       });
       // Sort by pnlUsd desc (champion first)
       out.sort((a, b) => b.pnlUsd - a.pnlUsd);
 
+      const reinvestedSum = out.reduce((s, b) => b.reinvested != null ? s + b.reinvested : s, 0);
+      const hasAnyReinvested = out.some(b => b.reinvested != null);
       const summary = {
         totalCash: +out.reduce((s, b) => s + b.pnlUsd, 0).toFixed(2),
-        totalReinvested: +out.reduce((s, b) => s + b.reinvested, 0).toFixed(2),
+        totalReinvested: hasAnyReinvested ? +reinvestedSum.toFixed(2) : null,
         botCount: out.length,
         activeBots: out.filter(b => b.enabled || b.activeDeals > 0).length,
       };
-      summary.totalLocked = +(summary.totalCash + summary.totalReinvested).toFixed(2);
+      summary.totalLocked = hasAnyReinvested
+        ? +(summary.totalCash + reinvestedSum).toFixed(2)
+        : summary.totalCash;
+      summary.reinvestedAvailable = hasAnyReinvested;
 
       res.end(JSON.stringify({
         bots: out,
         summary,
-        note: 'Reinvested values from manual 3Commas UI scrape (2026-06-01). 3Commas public REST does not expose reinvested directly. Update REINVESTED_OVERRIDE in server.js when values change.',
+        note: 'Reinvested values come from 3Commas API field reinvested_volume_usd. Currently null on most bots because 3Commas computes it server-side and does not always populate the public API field. Cash PnL (finished_deals_profit_usd) IS accurate. Reinvesting % shows how the bot is configured (100% = compounds all profit back).',
       }));
     } catch(e) {
       res.statusCode = 500;
