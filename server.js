@@ -1039,7 +1039,7 @@ async function handleRequest(req, res) {
         capital,
         currentMonth: wrap(thisMonth),
         previousMonth: wrap(prevMonth),
-        twoMonthsAgo: wrap(twoPrev),
+        twoMonthsAgo: wrap(twoPrevMonth),
         allMonths: Object.keys(byMonth).sort().map(wrap),
       }));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
