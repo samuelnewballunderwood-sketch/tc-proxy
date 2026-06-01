@@ -144,6 +144,8 @@ WHEN YOU CAN'T ACT — say so explicitly
 If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no Free balance, tell Sam: "Your \$X in {asset} is locked in Earn, redeem it and I'll grid it within the next tick." Never just go silent. Always explain blockers in one sentence.`;
 
 
+// Last-good cache for total-capital (in-memory, survives until process restart)
+let _lastGoodCapital = null;
 function hmacSign(secret, message) {
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
@@ -1820,6 +1822,89 @@ async function handleRequest(req, res) {
     } catch (e) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // ── GET /api/total-capital ──────────────────────────────────────────────────
+  // Composes total portfolio from 3Commas (canonical) + futures wallet.
+  // 3Commas accounts have usd_amount per linked exchange. This survives Binance
+  // IP bans because 3Commas API is independent.
+  if (req.method === 'GET' && url === '/api/total-capital') {
+    try {
+      async function tcFetch(path, qs='') {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        });
+        return r.json();
+      }
+
+      const [accounts, futuresR] = await Promise.all([
+        tcFetch('/ver1/accounts', 'limit=100').catch(() => null),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/futures-wallet').then(r => r.json()).catch(() => null),
+      ]);
+
+      // Sum usd_amount across all linked 3Commas accounts (this IS the canonical total)
+      let threeCommasTotal = 0;
+      const accountsBreakdown = [];
+      if (Array.isArray(accounts)) {
+        for (const a of accounts) {
+          const usd = parseFloat(a.usd_amount || a.usdt_amount || 0);
+          if (usd > 0) {
+            accountsBreakdown.push({ id: a.id, name: a.name, exchange: a.exchange_name, usd });
+            threeCommasTotal += usd;
+          }
+        }
+      }
+
+      // Cross-check with futures wallet
+      const futuresUsd = parseFloat(futuresR?.marginBalance || 0);
+
+      let total, source;
+      if (threeCommasTotal > 100) {
+        total = threeCommasTotal;
+        source = '3commas-portfolio';
+      } else if (futuresUsd > 0 && _lastGoodCapital) {
+        // 3Commas failed, use last-good
+        total = _lastGoodCapital.total;
+        source = 'cached-' + _lastGoodCapital.source;
+      } else if (futuresUsd > 0) {
+        total = futuresUsd;
+        source = 'futures-only-fallback';
+      } else if (_lastGoodCapital) {
+        total = _lastGoodCapital.total;
+        source = 'cached-' + _lastGoodCapital.source;
+      } else {
+        total = 0;
+        source = 'unavailable';
+      }
+
+      const payload = {
+        total,
+        source,
+        asOf: new Date().toISOString(),
+        breakdown: {
+          threeCommasAccounts: threeCommasTotal,
+          futuresMarginBalance: futuresUsd,
+          accounts: accountsBreakdown,
+        },
+      };
+
+      // Cache last good (only if from 3Commas, the canonical source)
+      if (source === '3commas-portfolio' && total > 100) {
+        _lastGoodCapital = { total, source: '3commas-portfolio', asOf: payload.asOf };
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload));
+    } catch (e) {
+      const fallback = _lastGoodCapital
+        ? { total: _lastGoodCapital.total, source: 'cached-error', asOf: _lastGoodCapital.asOf, error: e.message }
+        : { total: 0, source: 'error', error: e.message };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(fallback));
     }
     return;
   }
