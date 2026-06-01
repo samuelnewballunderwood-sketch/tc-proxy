@@ -1119,8 +1119,10 @@ async function handleRequest(req, res) {
       // Signal bots are tracked via grid endpoint with type filter — fallback: scan
       const dcaArr = Array.isArray(dca) ? dca : [];
       const gridArr = Array.isArray(grid) ? grid : [];
-      const dcaActive = dcaArr.filter(b => b.is_enabled).length;
-      const gridActive = gridArr.filter(b => b.is_enabled).length;
+      // 'Active' means: enabled OR currently has an open deal (matches 3Commas UI)
+      const isLive = b => (b.is_enabled === true) || ((b.active_deals_count || 0) > 0) || ((b.active_deals || []).length > 0);
+      const dcaActive = dcaArr.filter(isLive).length;
+      const gridActive = gridArr.filter(isLive).length;
       // Signal bots: 3Commas exposes them via /signal_bots — try it
       const signalR = await tcFetch('/signal_bots', 'limit=100').catch(() => []);
       const signalArr = Array.isArray(signalR) ? signalR : [];
