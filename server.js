@@ -1201,16 +1201,32 @@ async function handleRequest(req, res) {
       const gridEnabled = gridArr.filter(b => b.is_enabled === true);
       const gridTotal = gridEnabled.length;
       const gridActive = gridEnabled.length;
-      const signalTotal = 4;
-      const signalActive = 4;
-      const signalArr = [{},{},{},{}];
+      // Signal bots: try v2 API. If that fails, null (not hardcoded).
+      let signalTotal = null;
+      let signalActive = null;
+      try {
+        const sigPath = '/public/api/v2/signal_bots';
+        const sigSig = hmacSign(TC_SECRET, sigPath);
+        const sigR = await fetch('https://api.3commas.io' + sigPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sigSig, 'Accept': 'application/json' }
+        });
+        if (sigR.ok) {
+          const sigJson = await sigR.json();
+          const items = sigJson.items || (Array.isArray(sigJson) ? sigJson : []);
+          signalTotal = items.length;
+          signalActive = items.filter(b => b.state === 'enabled' || b.is_enabled === true).length;
+        }
+      } catch(_) {}
 
+      const sigTotalSafe = signalTotal != null ? signalTotal : 0;
+      const sigActiveSafe = signalActive != null ? signalActive : 0;
       const out = {
         dca:    { count: dcaTotal,    active: dcaActive },
         grid:   { count: gridTotal,   active: gridActive },
-        signal: { count: signalTotal, active: signalActive },
-        total:  { count: dcaTotal + gridTotal + signalTotal,
-                  active: dcaActive + gridActive + signalActive },
+        signal: { count: signalTotal, active: signalActive, available: signalTotal != null },
+        total:  { count: dcaTotal + gridTotal + sigTotalSafe,
+                  active: dcaActive + gridActive + sigActiveSafe,
+                  signalIncluded: signalTotal != null },
       };
       res.end(JSON.stringify(out));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
