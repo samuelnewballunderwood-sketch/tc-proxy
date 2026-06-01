@@ -1345,6 +1345,17 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── BTC perp funding rate (R18 input) ─────────────────────────
+  if (req.method === 'GET' && url === '/api/funding-rate') {
+    try {
+      const r = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify(data));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Binance OPEN SPOT ORDERS — what's actually holding capital ──
   if (req.method === 'GET' && url === '/api/binance-open-orders') {
     try {

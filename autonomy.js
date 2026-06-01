@@ -20,8 +20,8 @@ const WORKER_BASE       = process.env.WORKER_BASE        || 'https://alphacontro
 const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   !== 'false'; // default ON (set 'false' to disable)
 const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   === 'true';  // default OFF — trade live (set 'true' for dry-run)
 const AUTONOMY_KILL     = process.env.AUTONOMY_KILL_SWITCH === 'true';
-const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '5', 10);
-const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '60', 10);
+const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '8', 10);
+const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '50', 10);
 
 const TC_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
 const TC_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
@@ -101,6 +101,7 @@ const ALLOWLIST = [
   { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
   { actionType: 'spot_buy',    objective: 'fear_accumulate'   }, // R17: F&G extreme accumulation
   { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
+  { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -122,7 +123,7 @@ function _r17Increment() { _r17DailyCount++; }
 function _r16CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r16DayKey) { _r16DayKey = day; _r16DailyCount = 0; }
-  return _r16DailyCount < 2;
+  return _r16DailyCount < 5;
 }
 function _r16Increment() { _r16DailyCount++; }
 // Per (objective+asset) failed-attempt tracker — silences repeat-skip noise
@@ -153,24 +154,30 @@ function isAllowed(d) {
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
 
-  // Special path: spot_buy (R17) — F&G extreme accumulation
-  if (decision.actionType === 'spot_buy' && decision.objective === 'fear_accumulate') {
-    if (!_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (1/day)' }];
+  // Special path: spot_buy (R17 or R18) — fear accumulate or funding contrarian
+  if (decision.actionType === 'spot_buy') {
+    const isR17 = decision.objective === 'fear_accumulate';
+    const isR18 = decision.objective === 'funding_contrarian';
+    if (!isR17 && !isR18) return [{ note: 'spot_buy objective not handled: ' + decision.objective }];
+    if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (1/day)' }];
     const pair = decision.suggestedPair || 'USDT_BTC';
     const amount = parseFloat(decision.amount || 50);
+    // R18 reads direction from the decision text (sell or buy)
+    const direction = isR18 && /SELL/i.test(decision.text || '') ? 'sell' : 'buy';
+    const tpPct = isR17 ? 5 : 1;
+    const slPct = isR17 ? 5 : 1;
+    const strat = isR17 ? 'R17_fear_accumulate' : 'R18_funding_contrarian';
     try {
       const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pair, direction: 'buy', quoteAmount: amount,
-          takeProfitPct: 5,  // wider TP — this is accumulation, not scalp
-          stopLossPct: 5,
-          strategy: 'R17_fear_accumulate',
+          pair, direction, quoteAmount: amount,
+          takeProfitPct: tpPct, stopLossPct: slPct, strategy: strat,
         }),
       });
       const body = await r.json();
-      if (r.ok) _r17Increment();
-      return [{ smartTradeCreated: r.ok, status: r.status, amount, response: body }];
+      if (r.ok && isR17) _r17Increment();
+      return [{ smartTradeCreated: r.ok, status: r.status, amount, direction, response: body }];
     } catch(e) { return [{ error: e.message }]; }
   }
 
