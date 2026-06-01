@@ -97,6 +97,7 @@ const ALLOWLIST = [
   { actionType: 'deploy_grid', objective: 'idle_capital_deploy' }, // R9: auto-deploy idle USDT to BTC defensive grid
   { actionType: 'deploy_grid', objective: 'idle_crypto_grid'    }, // R12: per-asset grid for held crypto
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
+  { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -131,6 +132,23 @@ function isAllowed(d) {
 // ── Execute one decision ─────────────────────────────────────────────
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
+
+  // Special path: cancel_order (R15) — cancel stale spot orders
+  if (decision.actionType === 'cancel_order' && decision.objective === 'stale_order_cancel') {
+    const targets = decision.payload?.orders || [];
+    const results = [];
+    for (const t of targets) {
+      try {
+        const r = await fetch('https://tc-proxy-eu.onrender.com/api/binance-cancel-order', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: t.symbol, orderId: t.orderId }),
+        });
+        const body = await r.json();
+        results.push({ symbol: t.symbol, orderId: t.orderId, cancelled: r.ok, body });
+      } catch(e) { results.push({ symbol: t.symbol, orderId: t.orderId, error: e.message }); }
+    }
+    return results;
+  }
 
   // Special path: redeem (R14) — call Binance Earn redemption
   if (decision.actionType === 'redeem' && decision.objective === 'auto_redeem') {

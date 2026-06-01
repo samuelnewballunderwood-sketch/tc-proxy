@@ -1109,6 +1109,70 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Binance OPEN SPOT ORDERS — what's actually holding capital ──
+  if (req.method === 'GET' && url === '/api/binance-open-orders') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const ts = Date.now();
+      const q = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r = await fetch(`https://api.binance.com/api/v3/openOrders?${q}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      if (!r.ok) { res.statusCode = r.status; res.end(JSON.stringify(data)); return; }
+      // Annotate orders with age + base asset + estimated locked value
+      const prices = await fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>({}));
+      const annotated = (data || []).map(o => {
+        const ageHours = (Date.now() - o.time) / 3600000;
+        const base = o.symbol.replace(/USDT|USDC$/, '');
+        const price = parseFloat(prices[o.symbol] || prices[base+'USDT'] || 0);
+        const qty = parseFloat(o.origQty || 0);
+        const lockedValueUsd = o.side === 'BUY'
+          ? qty * parseFloat(o.price || 0)   // USDT being held for buy
+          : qty * price;                      // base asset held for sell
+        return {
+          orderId: o.orderId, symbol: o.symbol, side: o.side, type: o.type,
+          price: o.price, qty: o.origQty, executedQty: o.executedQty,
+          time: o.time, ageHours: +ageHours.toFixed(1),
+          base, lockedValueUsd: +lockedValueUsd.toFixed(2),
+          clientOrderId: o.clientOrderId,  // 3Commas usually prefixes these
+        };
+      });
+      // Group + summarise
+      const bySymbol = {};
+      for (const o of annotated) {
+        bySymbol[o.symbol] = bySymbol[o.symbol] || { count: 0, oldestHours: 0, totalUsd: 0, orders: [] };
+        bySymbol[o.symbol].count++;
+        bySymbol[o.symbol].oldestHours = Math.max(bySymbol[o.symbol].oldestHours, o.ageHours);
+        bySymbol[o.symbol].totalUsd += o.lockedValueUsd;
+        bySymbol[o.symbol].orders.push(o);
+      }
+      res.end(JSON.stringify({ totalOrders: annotated.length, bySymbol }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── Cancel a Binance spot order ─────────────────────────────────
+  if (req.method === 'POST' && url === '/api/binance-cancel-order') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const body = JSON.parse(await readBody(req));
+      const symbol = body.symbol; const orderId = body.orderId;
+      if (!symbol || !orderId) { res.statusCode = 400; res.end(JSON.stringify({error:'symbol + orderId required'})); return; }
+      const ts = Date.now();
+      const q = `symbol=${symbol}&orderId=${orderId}&timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r = await fetch(`https://api.binance.com/api/v3/order?${q}&signature=${sig}`, {
+        method: 'DELETE', headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ cancelled: r.ok, result: data }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Binance Simple Earn LOCKED: positions ─────────────────────
   if (req.method === 'GET' && url === '/api/binance-locked-earn-positions') {
     try {
