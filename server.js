@@ -1123,10 +1123,11 @@ async function handleRequest(req, res) {
       const isLive = b => (b.is_enabled === true) || ((b.active_deals_count || 0) > 0) || ((b.active_deals || []).length > 0);
       const dcaActive = dcaArr.filter(isLive).length;
       const gridActive = gridArr.filter(isLive).length;
-      // Signal bots: 3Commas exposes them via /signal_bots — try it
-      const signalR = await tcFetch('/signal_bots', 'limit=100').catch(() => []);
-      const signalArr = Array.isArray(signalR) ? signalR : [];
-      const signalActive = signalArr.filter(b => b.is_enabled !== false).length;
+      // Signal bots: NOT exposed via 3Commas public REST API (only via wapi/cookie auth).
+      // Known via manual UI check: 4 total, 2 actually trade (BTC + ETH Binance Signal).
+      // TODO: scrape via Chrome session OR wait for 3Commas to expose in v1 API.
+      const signalArr = [{}, {}, {}, {}];  // 4 known
+      const signalActive = 2;              // 2 active (BTC + ETH)
 
       const out = {
         dca:    { count: dcaArr.length,    active: dcaActive },
