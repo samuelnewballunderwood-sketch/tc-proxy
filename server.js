@@ -1109,6 +1109,79 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Binance Simple Earn LOCKED: positions ─────────────────────
+  if (req.method === 'GET' && url === '/api/binance-locked-earn-positions') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const ts = Date.now();
+      const q = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r = await fetch(`https://api.binance.com/sapi/v1/simple-earn/locked/position?${q}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify(data));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── Binance Simple Earn LOCKED: redeem ────────────────────────
+  if (req.method === 'POST' && url === '/api/binance-redeem-locked-earn') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const body = JSON.parse(await readBody(req));
+      const positionId = body.positionId;
+      if (!positionId) { res.statusCode = 400; res.end(JSON.stringify({error:'positionId required'})); return; }
+      const ts = Date.now();
+      const q = `positionId=${positionId}&timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r = await fetch(`https://api.binance.com/sapi/v1/simple-earn/locked/redeem?${q}&signature=${sig}`, {
+        method: 'POST',
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ success: r.ok, positionId, result: data }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── CAPITAL AUDIT — unified where-is-my-money view ────────────
+  if (req.method === 'GET' && url === '/api/capital-audit') {
+    try {
+      const [spot, flex, locked, bots, prices] = await Promise.all([
+        fetch('https://tc-proxy-eu.onrender.com/spot-wallet').then(r=>r.json()).catch(()=>null),
+        fetch('https://tc-proxy-eu.onrender.com/api/binance-earn-positions').then(r=>r.json()).catch(()=>null),
+        fetch('https://tc-proxy-eu.onrender.com/api/binance-locked-earn-positions').then(r=>r.json()).catch(()=>null),
+        fetch('https://tc-proxy-eu.onrender.com/bots').then(r=>r.json()).catch(()=>null),
+        fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>null),
+      ]);
+      const RELEVANT = ['BTC','ETH','SOL','XRP','BNB','USDT','USDC'];
+      const px = (a) => parseFloat((prices||{})[a+'USDT'] || (a === 'USDT' || a === 'USDC' ? 1 : 0));
+      const audit = {};
+      for (const asset of RELEVANT) {
+        const bal = (spot?.balances || []).find(b => b.asset === asset);
+        const flexPos = (flex?.rows || []).find(p => p.asset === asset);
+        const lockedPos = (locked?.rows || []).filter(p => p.asset === asset);
+        const activeBots = (bots?.bots || []).filter(b => b.active && (b.pair || '').toUpperCase().includes(asset));
+        audit[asset] = {
+          price: px(asset),
+          spotFree: bal ? parseFloat(bal.free) : 0,
+          spotLocked: bal ? parseFloat(bal.locked) : 0,
+          flexibleEarn: flexPos ? parseFloat(flexPos.totalAmount) : 0,
+          lockedEarn: lockedPos.reduce((s,p) => s + parseFloat(p.amount||0), 0),
+          lockedEarnPositions: lockedPos.map(p => ({id:p.positionId, amount:p.amount, endTime:p.endTime})),
+          activeBots: activeBots.map(b => ({id:b.id, name:b.name, capital:b.capital, profit:b.profit})),
+          activeBotCapitalUsd: activeBots.reduce((s,b) => s + (parseFloat(b.capital)||0), 0),
+        };
+        audit[asset].totalUsd = +((audit[asset].spotFree + audit[asset].spotLocked + audit[asset].flexibleEarn + audit[asset].lockedEarn) * audit[asset].price).toFixed(2);
+      }
+      res.end(JSON.stringify({ audit }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── DELETE a grid bot via 3Commas ─────────────────────────────────
   if (req.method === 'POST' && url.match(/^\/api\/grid-bot\/\d+\/delete$/)) {
     try {
