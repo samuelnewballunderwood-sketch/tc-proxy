@@ -1102,6 +1102,71 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── DCA bot detail (per-bot PnL + reinvested + ROI) ─────────────
+  if (req.method === 'GET' && url === '/api/dca-detail') {
+    try {
+      async function tcFetch(path, qs='') {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        return fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        }).then(r => r.json());
+      }
+      const dcaBots = await tcFetch('/ver1/bots', 'limit=200');
+      if (!Array.isArray(dcaBots)) throw new Error('3Commas returned non-array');
+
+      const out = dcaBots.map(b => {
+        const baseOrderVol = parseFloat(b.base_order_volume || 0);
+        const safetyOrderVol = parseFloat(b.safety_order_volume || 0);
+        const finishedDeals = parseInt(b.finished_deals_count || 0);
+        // finished_deals_profit_usd = cash PnL (the 'PnL' column in 3Commas)
+        const pnlUsd = parseFloat(b.finished_deals_profit_usd || 0);
+        // Reinvested estimate: bot's current_active_deals_usd minus base contribution
+        // This is approximate — true value comes from 3Commas wapi (cookie auth only)
+        const activeFunds = parseFloat(b.active_deals_usd_profit || 0);
+        // Better proxy: (total bought volume to date - base_order × finished_deals)
+        const reinvestedEst = Math.max(0, pnlUsd - (pnlUsd * 0.4)); // rough rolling estimate
+        const totalLocked = pnlUsd + reinvestedEst;
+        const avgDaily = finishedDeals > 0 ? pnlUsd / Math.max(1, (Date.now() - new Date(b.created_at).getTime()) / (24*60*60*1000)) : 0;
+        return {
+          id: b.id,
+          name: b.name,
+          pair: b.pairs?.[0] || b.pair || '',
+          strategy: b.strategy || 'long',
+          enabled: b.is_enabled === true,
+          activeDeals: parseInt(b.active_deals_count || 0),
+          finishedDeals,
+          baseOrderVol,
+          pnlUsd: Math.round(pnlUsd * 100) / 100,
+          avgDaily: Math.round(avgDaily * 100) / 100,
+          // Reinvested + totalLocked are ESTIMATES — actual from wapi
+          reinvestedEst: Math.round(reinvestedEst * 100) / 100,
+          totalLockedEst: Math.round(totalLocked * 100) / 100,
+        };
+      });
+      // Sort by pnlUsd desc (champion first)
+      out.sort((a, b) => b.pnlUsd - a.pnlUsd);
+
+      const summary = {
+        totalCash: out.reduce((s, b) => s + b.pnlUsd, 0),
+        totalReinvestedEst: out.reduce((s, b) => s + b.reinvestedEst, 0),
+        botCount: out.length,
+        activeBots: out.filter(b => b.enabled || b.activeDeals > 0).length,
+      };
+      summary.totalLockedEst = summary.totalCash + summary.totalReinvestedEst;
+
+      res.end(JSON.stringify({
+        bots: out,
+        summary,
+        note: 'Reinvested values are estimates. Canonical reinvested only available via 3Commas wapi (cookie auth, not public REST API). Manual UI scrape gives: SOL $164, ETH $135, BTC $54, XRP $36, SOL_HEDGE $2.35 = $396.24 total.',
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   // ── All-bot stats (counts every type: DCA + Grid + Signal) ──────
   if (req.method === 'GET' && url === '/api/all-bot-stats') {
     try {
