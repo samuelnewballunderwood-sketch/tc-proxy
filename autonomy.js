@@ -119,7 +119,7 @@ const ALLOWLIST = [
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
   { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
   { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
-  { actionType: 'spot_buy',    objective: 'fear_accumulate'   }, // R17: F&G extreme accumulation
+  // R17 fear_accumulate removed from ALLOWLIST — hold-style, conflicts with scalp mandate
   { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
   { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
@@ -159,7 +159,8 @@ function _r17Increment() { _r17DailyCount++; }
 function _r16CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r16DayKey) { _r16DayKey = day; _r16DailyCount = 0; }
-  return _r16DailyCount < 5;
+  return _r16DailyCount < 10; // scalp mode — more trades, tighter
+
 }
 function _r16Increment() { _r16DailyCount++; }
 // Per (objective+asset) failed-attempt tracker — silences repeat-skip noise
@@ -192,19 +193,21 @@ async function executeDecision(decision, openDealBotIds) {
 
   // Special path: spot_buy (R17 or R18) — fear accumulate or funding contrarian
   if (decision.actionType === 'spot_buy') {
-    const isR17 = decision.objective === 'fear_accumulate';
     const isR18 = decision.objective === 'funding_contrarian';
-    if (!isR17 && !isR18) return [{ note: 'spot_buy objective not handled: ' + decision.objective }];
-    if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (1/day)' }];
+    const isR25 = decision.objective === 'momentum_scalp';
+    const isR17 = decision.objective === 'fear_accumulate';
+    if (isR17) return [{ skipped: 'R17 holds disabled — Hannah is scalp-only. R17 fires as advisory.' }];
+    if (!isR18 && !isR25) return [{ note: 'spot_buy objective not in scalp mode: ' + decision.objective }];
     const amt = parseFloat(decision.amount || 50);
     if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
     const amount = parseFloat(decision.amount || 50);
     // R18 reads direction from the decision text (sell or buy)
-    const direction = isR18 && /SELL/i.test(decision.text || '') ? 'sell' : 'buy';
-    const tpPct = isR17 ? 5 : 1;
-    const slPct = isR17 ? 5 : 1;
-    const strat = isR17 ? 'R17_fear_accumulate' : 'R18_funding_contrarian';
+    // Scalp mode: tight targets, fast in-out
+    const direction = (isR18 || isR25) && /SELL/i.test(decision.text || '') ? 'sell' : 'buy';
+    const tpPct = isR18 ? 0.5 : isR25 ? 0.6 : 0.8;
+    const slPct = isR18 ? 0.7 : isR25 ? 0.8 : 1.0;
+    const strat = isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : 'unknown';
     try {
       const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -237,7 +240,7 @@ async function executeDecision(decision, openDealBotIds) {
   // Special path: tv_signal (R16) — act on TradingView Bj Bot alert
   if (decision.actionType === 'tv_signal' && decision.objective === 'tv_signal_act') {
     if (!_r16CheckCap()) return [{ skipped: 'R16 daily cap reached' }];
-    if (!_discCheck(100)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
+    if (!_discCheck(50)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const alert = decision.payload?.alert;
     if (!alert) return [{ error: 'no alert payload' }];
     if (_r16ProcessedAlertIds.has(alert.ts)) return [{ skipped: 'alert already processed', ts: alert.ts }];
@@ -252,8 +255,8 @@ async function executeDecision(decision, openDealBotIds) {
       const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pair, direction, quoteAmount: 100, takeProfitPct: 1.5, stopLossPct: 1.5,
-          strategy: alert.strategy || 'Bj_Bot',
+          pair, direction, quoteAmount: 50, takeProfitPct: 0.8, stopLossPct: 1.0,
+          strategy: 'R16_' + (alert.strategy || 'Bj_Bot') + '_scalp',
         }),
       });
       const raw = await r.text();
@@ -261,7 +264,7 @@ async function executeDecision(decision, openDealBotIds) {
       if (r.ok) {
         _r16ProcessedAlertIds.add(alert.ts);
         _r16Increment();
-        _discAdd(100);
+        _discAdd(50);
       }
       return [{ smartTradeCreated: r.ok, status: r.status, alert, response: body }];
     } catch(e) { return [{ error: e.message }]; }

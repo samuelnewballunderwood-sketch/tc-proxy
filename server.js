@@ -1165,9 +1165,9 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: 'pair + quoteAmount required' }));
         return;
       }
-      if (quoteAmount < 50 || quoteAmount > 200) {
+      if (quoteAmount < 25 || quoteAmount > 200) {
         res.statusCode = 400;
-        res.end(JSON.stringify({ error: 'quoteAmount must be $50-$200 (R16 safety cap)' }));
+        res.end(JSON.stringify({ error: 'quoteAmount must be $25-$200 (scalp-mode cap)' }));
         return;
       }
       if (tpPct > 5 || slPct > 5) {
