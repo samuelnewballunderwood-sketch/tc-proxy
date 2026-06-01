@@ -102,6 +102,7 @@ const ALLOWLIST = [
   { actionType: 'spot_buy',    objective: 'fear_accumulate'   }, // R17: F&G extreme accumulation
   { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
   { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
+  { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -114,6 +115,21 @@ let _r16DailyCount = 0;
 let _r16DayKey = '';
 let _r17DailyCount = 0;
 let _r17DayKey = '';
+// Discretionary wallet — cap total daily Smart Trade spend across R16/R17/R18
+const DISCRETIONARY_DAILY_CAP_USD = parseFloat(process.env.DISCRETIONARY_DAILY_CAP_USD || '500');
+let _discSpendUsd = 0;
+let _discDayKey = '';
+function _discCheck(amount) {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _discDayKey) { _discDayKey = day; _discSpendUsd = 0; }
+  return (_discSpendUsd + amount) <= DISCRETIONARY_DAILY_CAP_USD;
+}
+function _discAdd(amount) { _discSpendUsd += amount; }
+function _discStatus() {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _discDayKey) { return { day, spentUsd: 0, capUsd: DISCRETIONARY_DAILY_CAP_USD }; }
+  return { day: _discDayKey, spentUsd: _discSpendUsd, capUsd: DISCRETIONARY_DAILY_CAP_USD };
+}
 function _r17CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r17DayKey) { _r17DayKey = day; _r17DailyCount = 0; }
@@ -160,6 +176,8 @@ async function executeDecision(decision, openDealBotIds) {
     const isR18 = decision.objective === 'funding_contrarian';
     if (!isR17 && !isR18) return [{ note: 'spot_buy objective not handled: ' + decision.objective }];
     if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (1/day)' }];
+    const amt = parseFloat(decision.amount || 50);
+    if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
     const amount = parseFloat(decision.amount || 50);
     // R18 reads direction from the decision text (sell or buy)
@@ -177,6 +195,7 @@ async function executeDecision(decision, openDealBotIds) {
       });
       const body = await r.json();
       if (r.ok && isR17) _r17Increment();
+      if (r.ok) _discAdd(amt);
       return [{ smartTradeCreated: r.ok, status: r.status, amount, direction, response: body }];
     } catch(e) { return [{ error: e.message }]; }
   }
@@ -197,7 +216,8 @@ async function executeDecision(decision, openDealBotIds) {
 
   // Special path: tv_signal (R16) — act on TradingView Bj Bot alert
   if (decision.actionType === 'tv_signal' && decision.objective === 'tv_signal_act') {
-    if (!_r16CheckCap()) return [{ skipped: 'R16 daily cap reached (2/day)' }];
+    if (!_r16CheckCap()) return [{ skipped: 'R16 daily cap reached' }];
+    if (!_discCheck(100)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const alert = decision.payload?.alert;
     if (!alert) return [{ error: 'no alert payload' }];
     if (_r16ProcessedAlertIds.has(alert.ts)) return [{ skipped: 'alert already processed', ts: alert.ts }];
@@ -221,6 +241,7 @@ async function executeDecision(decision, openDealBotIds) {
       if (r.ok) {
         _r16ProcessedAlertIds.add(alert.ts);
         _r16Increment();
+        _discAdd(100);
       }
       return [{ smartTradeCreated: r.ok, status: r.status, alert, response: body }];
     } catch(e) { return [{ error: e.message }]; }
@@ -434,7 +455,7 @@ function getActions(limit) {
   return recentActions.slice(0, Math.max(1, Math.min(200, n)));
 }
 function getStatus() {
-  return { ...STATUS, lastTickAt, lastTickError, recentCount: recentActions.length };
+  return { ...STATUS, lastTickAt, lastTickError, recentCount: recentActions.length, discretionary: _discStatus() };
 }
 async function manualExecute(decision) {
   if (AUTONOMY_KILL)           return { error: 'kill_switch_active' };
