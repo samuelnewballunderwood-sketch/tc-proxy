@@ -1190,21 +1190,26 @@ async function handleRequest(req, res) {
       // Signal bots are tracked via grid endpoint with type filter — fallback: scan
       const dcaArr = Array.isArray(dca) ? dca : [];
       const gridArr = Array.isArray(grid) ? grid : [];
-      // 'Active' means: enabled OR currently has an open deal (matches 3Commas UI)
-      const isLive = b => (b.is_enabled === true) || ((b.active_deals_count || 0) > 0) || ((b.active_deals || []).length > 0);
-      const dcaActive = dcaArr.filter(isLive).length;
-      const gridActive = gridArr.filter(isLive).length;
-      // Signal bots: NOT exposed via 3Commas public REST API (only via wapi/cookie auth).
-      // Known via manual UI check: 4 total, 2 actually trade (BTC + ETH Binance Signal).
-      // TODO: scrape via Chrome session OR wait for 3Commas to expose in v1 API.
-      const signalArr = [{}, {}, {}, {}];  // 4 known
-      const signalActive = 2;              // 2 active (BTC + ETH)
+      // Match 3Commas UI exactly:
+      //   DCA: API returns 10 current bots (no archived). active = is_enabled true.
+      //        Stuck open deals don't count as 'active' — they're paused mid-flight.
+      //   Grid: API returns ALL grids including archived. UI shows only enabled.
+      //        So total + active are both: is_enabled === true.
+      //   Signal: hardcoded 4/4 (Sam's 3Commas check 2026-06-01) — public API doesn't expose.
+      const dcaTotal = dcaArr.length;
+      const dcaActive = dcaArr.filter(b => b.is_enabled === true).length;
+      const gridEnabled = gridArr.filter(b => b.is_enabled === true);
+      const gridTotal = gridEnabled.length;
+      const gridActive = gridEnabled.length;
+      const signalTotal = 4;
+      const signalActive = 4;
+      const signalArr = [{},{},{},{}];
 
       const out = {
-        dca:    { count: dcaArr.length,    active: dcaActive },
-        grid:   { count: gridArr.length,   active: gridActive },
-        signal: { count: signalArr.length, active: signalActive },
-        total:  { count: dcaArr.length + gridArr.length + signalArr.length,
+        dca:    { count: dcaTotal,    active: dcaActive },
+        grid:   { count: gridTotal,   active: gridActive },
+        signal: { count: signalTotal, active: signalActive },
+        total:  { count: dcaTotal + gridTotal + signalTotal,
                   active: dcaActive + gridActive + signalActive },
       };
       res.end(JSON.stringify(out));
