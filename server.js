@@ -979,6 +979,42 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── R23: Per-rule P&L attribution ─────────────────────────────
+  if (req.method === 'GET' && url === '/api/rule-performance') {
+    try {
+      const bots = await fetch('http://localhost:'+(process.env.PORT||3000)+'/bots').then(r=>r.json()).catch(()=>null);
+      const hannah = (bots?.bots || []).filter(b => /^Hannah[-_]R/i.test(b.name||''));
+      const perRule = {};
+      for (const b of hannah) {
+        const m = (b.name || '').match(/Hannah[-_](R\d+|R2L|R\?)/i);
+        if (!m) continue;
+        const rule = m[1].toUpperCase();
+        perRule[rule] = perRule[rule] || { rule, botCount: 0, activeBots: 0, capital: 0, profit: 0, bots: [] };
+        perRule[rule].botCount++;
+        if (b.active) perRule[rule].activeBots++;
+        perRule[rule].capital += parseFloat(b.capital || 0);
+        perRule[rule].profit  += parseFloat(b.profit  || 0);
+        perRule[rule].bots.push({ id: b.id, name: b.name, active: b.active, capital: b.capital, profit: b.profit });
+      }
+      const rules = Object.values(perRule).map(r => ({
+        ...r,
+        roi: r.capital > 0 ? +((r.profit/r.capital)*100).toFixed(2) : 0,
+        verdict: r.profit > 0 ? 'profitable' : r.profit < 0 ? 'losing' : 'flat',
+      })).sort((a,b) => b.profit - a.profit);
+      // Legacy bots (created before R23) — show as 'pre-R23' bucket
+      const legacy = (bots?.bots || []).filter(b => /Hannah/i.test(b.name||'') && !/Hannah[-_]R/i.test(b.name||''));
+      const legacyAgg = legacy.length > 0 ? {
+        rule: 'PRE-R23', botCount: legacy.length,
+        activeBots: legacy.filter(b => b.active).length,
+        capital: legacy.reduce((s,b) => s + (parseFloat(b.capital)||0), 0),
+        profit:  legacy.reduce((s,b) => s + (parseFloat(b.profit)||0), 0),
+        note: 'Bots created before attribution was wired',
+      } : null;
+      res.end(JSON.stringify({ rules, legacy: legacyAgg }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Hannah performance summary ───────────────────────────────────
   if (req.method === 'GET' && url === '/api/hannah-performance') {
     try {

@@ -74,6 +74,26 @@ async function tc3(method, path, qs) {
   return { status: r.status, body: parsed ?? raw };
 }
 
+// R23: map decision objective to rule code for P&L attribution
+function _ruleCode(decision) {
+  const obj = decision.objective || '';
+  return {
+    idle_capital_deploy: 'R9',
+    idle_crypto_grid:    'R12',
+    bear_hedge:          'R13',
+    regime_lift:         'R2L',
+    fear_accumulate:     'R17',
+    funding_contrarian:  'R18',
+    grid_profit_take:    'R19',
+    grid_recenter:       'R20',
+    compound_grid:       'R21',
+    tv_signal_act:       'R16',
+    bot_efficiency:      'R3',
+    auto_redeem:         'R14',
+    stale_order_cancel:  'R15',
+  }[obj] || 'R?';
+}
+
 // ── R8 protection: which bots have active deals? ─────────────────────
 async function getOpenDealBotIds() {
   const ids = new Set();
@@ -324,7 +344,7 @@ async function executeDecision(decision, openDealBotIds) {
       gridQuantity: 30,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
-      name: 'Hannah-' + asset + '-' + new Date().toISOString().slice(0,10),
+      name: 'Hannah-' + _ruleCode(decision) + '-' + asset + '-' + new Date().toISOString().slice(0,10),
     };
     let cr, cj;
     try {
