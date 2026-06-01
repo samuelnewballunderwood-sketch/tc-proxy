@@ -174,6 +174,10 @@ async function handleRequest(req, res) {
   const TC_SECRET = process.env.TC_SECRET;
   const BN_KEY    = process.env.BINANCE_API_KEY;
   const BN_SECRET = process.env.BINANCE_SECRET;
+  const ETORO_API_KEY  = process.env.ETORO_API_KEY  || '';
+  const ETORO_USER_KEY = process.env.ETORO_USER_KEY || '';
+  const ETORO_ENV      = (process.env.ETORO_ENV || 'demo').toLowerCase();
+  const ETORO_DRY_RUN  = process.env.ETORO_DRY_RUN !== 'false'; // default ON
 
   const url = req.url.split('?')[0];
 
@@ -1181,6 +1185,113 @@ async function handleRequest(req, res) {
         smartTrade: data,
       }));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── eToro Agent Portfolio client ─────────────────────────────────
+  const etoroHeaders = () => ({
+    'x-api-key': ETORO_API_KEY,
+    'x-user-key': ETORO_USER_KEY,
+    'x-request-id': crypto.randomUUID(),
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+  });
+  const etoroSeg = () => ETORO_ENV === 'real' ? 'real' : 'demo';
+  const ETORO_BASE = 'https://public-api.etoro.com/api/v1';
+
+  // GET /api/etoro/health  — connectivity check (calls /watchlists)
+  if (req.method === 'GET' && url === '/api/etoro/health') {
+    try {
+      if (!ETORO_API_KEY || !ETORO_USER_KEY) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ ok: false, error: 'ETORO_API_KEY or ETORO_USER_KEY missing' }));
+        return;
+      }
+      const r = await fetch(ETORO_BASE + '/watchlists', { headers: etoroHeaders() });
+      const text = await r.text();
+      let body; try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ ok: r.ok, status: r.status, env: ETORO_ENV, dryRun: ETORO_DRY_RUN, sample: body }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // GET /api/etoro/portfolio — current portfolio for the Agent
+  if (req.method === 'GET' && url === '/api/etoro/portfolio') {
+    try {
+      if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
+      const r = await fetch(`${ETORO_BASE}/trading/${etoroSeg()}/portfolio`, { headers: etoroHeaders() });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify(data));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // GET /api/etoro/search?symbol=AAPL — resolve instrument ID
+  if (req.method === 'GET' && req.url.startsWith('/api/etoro/search')) {
+    try {
+      if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
+      const sym = new URL(req.url, 'http://x').searchParams.get('symbol');
+      if (!sym) { res.statusCode = 400; res.end(JSON.stringify({error:'symbol param required'})); return; }
+      const r = await fetch(`${ETORO_BASE}/market-data/search?internalSymbolFull=${encodeURIComponent(sym)}`, { headers: etoroHeaders() });
+      const data = await r.json();
+      const match = (data.items || []).find(i => i.internalSymbolFull === sym) || (data.items || [])[0];
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ symbol: sym, instrumentId: match?.instrumentId, match }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // POST /api/etoro/open  — open by amount {symbol, amount, leverage=1, direction=buy}
+  if (req.method === 'POST' && url === '/api/etoro/open') {
+    try {
+      if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
+      const body = JSON.parse(await readBody(req));
+      const symbol = body.symbol;
+      const amount = parseFloat(body.amount);
+      const leverage = parseInt(body.leverage || 1, 10);
+      const isBuy = body.direction !== 'sell';
+      if (!symbol || !amount) { res.statusCode = 400; res.end(JSON.stringify({error:'symbol + amount required'})); return; }
+      if (amount < 50 || amount > 500) { res.statusCode = 400; res.end(JSON.stringify({error:'amount must be \$50-\$500 (safety cap)'})); return; }
+      // Resolve instrument ID
+      const sr = await fetch(`${ETORO_BASE}/market-data/search?internalSymbolFull=${encodeURIComponent(symbol)}`, { headers: etoroHeaders() });
+      const sData = await sr.json();
+      const match = (sData.items || []).find(i => i.internalSymbolFull === symbol);
+      if (!match) { res.statusCode = 404; res.end(JSON.stringify({error:'instrument not found for '+symbol})); return; }
+      const payload = { InstrumentId: match.instrumentId, Amount: amount, Leverage: leverage, IsBuy: isBuy };
+      if (ETORO_DRY_RUN) {
+        res.end(JSON.stringify({ dryRun: true, wouldPost: payload, symbol, instrumentId: match.instrumentId }));
+        return;
+      }
+      const r = await fetch(`${ETORO_BASE}/trading/execution/${etoroSeg()}/market-open-orders/by-amount`, {
+        method: 'POST', headers: etoroHeaders(), body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ success: r.ok, symbol, payload, response: data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // POST /api/etoro/close — close position {positionId}
+  if (req.method === 'POST' && url === '/api/etoro/close') {
+    try {
+      if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
+      const body = JSON.parse(await readBody(req));
+      const positionId = body.positionId;
+      if (!positionId) { res.statusCode = 400; res.end(JSON.stringify({error:'positionId required'})); return; }
+      if (ETORO_DRY_RUN) {
+        res.end(JSON.stringify({ dryRun: true, wouldClose: positionId }));
+        return;
+      }
+      const r = await fetch(`${ETORO_BASE}/trading/execution/${etoroSeg()}/market-close-orders/positions/${positionId}`, {
+        method: 'POST', headers: etoroHeaders(), body: JSON.stringify({ UnitsToDeduct: null }),
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({ success: r.ok, positionId, response: data }));
+    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
 
