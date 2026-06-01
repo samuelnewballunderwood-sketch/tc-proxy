@@ -123,6 +123,7 @@ const ALLOWLIST = [
   { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
   { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
+  { actionType: 'spot_buy',    objective: 'liq_cascade_buy'  }, // R30: buy wick after liquidation cascade
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -196,8 +197,9 @@ async function executeDecision(decision, openDealBotIds) {
     const isR18 = decision.objective === 'funding_contrarian';
     const isR25 = decision.objective === 'momentum_scalp';
     const isR17 = decision.objective === 'fear_accumulate';
+    const isR30 = decision.objective === 'liq_cascade_buy';
     if (isR17) return [{ skipped: 'R17 holds disabled — Hannah is scalp-only. R17 fires as advisory.' }];
-    if (!isR18 && !isR25) return [{ note: 'spot_buy objective not in scalp mode: ' + decision.objective }];
+    if (!isR18 && !isR25 && !isR30) return [{ note: 'spot_buy objective not in scalp mode: ' + decision.objective }];
     const amt = parseFloat(decision.amount || 50);
     if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
@@ -205,9 +207,9 @@ async function executeDecision(decision, openDealBotIds) {
     // R18 reads direction from the decision text (sell or buy)
     // Scalp mode: tight targets, fast in-out
     const direction = (isR18 || isR25) && /SELL/i.test(decision.text || '') ? 'sell' : 'buy';
-    const tpPct = isR18 ? 0.5 : isR25 ? 0.6 : 0.8;
-    const slPct = isR18 ? 0.7 : isR25 ? 0.8 : 1.0;
-    const strat = isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : 'unknown';
+    const tpPct = isR18 ? 0.5 : isR25 ? 0.6 : isR30 ? 0.7 : 0.8;
+    const slPct = isR18 ? 0.7 : isR25 ? 0.8 : isR30 ? 0.9 : 1.0;
+    const strat = isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : isR30 ? 'R30_liq_hunter' : 'unknown';
     try {
       const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
