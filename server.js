@@ -1102,6 +1102,42 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── All-bot stats (counts every type: DCA + Grid + Signal) ──────
+  if (req.method === 'GET' && url === '/api/all-bot-stats') {
+    try {
+      async function tcFetch(path, qs='') {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        return fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        }).then(r => r.json());
+      }
+      const [dca, grid] = await Promise.all([
+        tcFetch('/ver1/bots', 'limit=200'),
+        tcFetch('/ver1/grid_bots', 'limit=200'),
+      ]);
+      // Signal bots are tracked via grid endpoint with type filter — fallback: scan
+      const dcaArr = Array.isArray(dca) ? dca : [];
+      const gridArr = Array.isArray(grid) ? grid : [];
+      const dcaActive = dcaArr.filter(b => b.is_enabled).length;
+      const gridActive = gridArr.filter(b => b.is_enabled).length;
+      // Signal bots: 3Commas exposes them via /signal_bots — try it
+      const signalR = await tcFetch('/signal_bots', 'limit=100').catch(() => []);
+      const signalArr = Array.isArray(signalR) ? signalR : [];
+      const signalActive = signalArr.filter(b => b.is_enabled !== false).length;
+
+      const out = {
+        dca:    { count: dcaArr.length,    active: dcaActive },
+        grid:   { count: gridArr.length,   active: gridActive },
+        signal: { count: signalArr.length, active: signalActive },
+        total:  { count: dcaArr.length + gridArr.length + signalArr.length,
+                  active: dcaActive + gridActive + signalActive },
+      };
+      res.end(JSON.stringify(out));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Hannah performance summary ───────────────────────────────────
   if (req.method === 'GET' && url === '/api/hannah-performance') {
     try {
