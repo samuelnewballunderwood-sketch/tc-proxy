@@ -1109,6 +1109,81 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Create 3Commas Smart Trade (used by R16 for TV signal trades) ──
+  if (req.method === 'POST' && url === '/api/create-smart-trade') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const pair = body.pair;                              // e.g. "USDT_BTC"
+      const direction = (body.direction || 'buy').toLowerCase();  // buy|sell
+      const quoteAmount = parseFloat(body.quoteAmount);    // USDT to spend
+      const tpPct = parseFloat(body.takeProfitPct || 1.5);
+      const slPct = parseFloat(body.stopLossPct  || 1.5);
+      const accountId = body.accountId || 33438577;
+      // ── safety caps ──
+      if (!pair || !quoteAmount) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'pair + quoteAmount required' }));
+        return;
+      }
+      if (quoteAmount < 50 || quoteAmount > 200) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'quoteAmount must be $50-$200 (R16 safety cap)' }));
+        return;
+      }
+      if (tpPct > 5 || slPct > 5) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'TP/SL must be <=5% (R16 safety cap)' }));
+        return;
+      }
+      // ── Get current price for unit conversion ──
+      const prices = await fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>({}));
+      const base = pair.split('_')[1] || 'BTC';
+      const price = parseFloat(prices[base+'USDT'] || prices[base] || 0);
+      if (price <= 0) { res.statusCode=500; res.end(JSON.stringify({error:'cannot resolve price'})); return; }
+      const STEP_BY_ASSET = { BTC: 0.00001, ETH: 0.0001, BNB: 0.001, SOL: 0.001, XRP: 0.1 };
+      const step = STEP_BY_ASSET[base] || 0.001;
+      const units = +(Math.round((quoteAmount / price) / step) * step).toFixed(8);
+      const tpPrice = +(direction === 'buy' ? price * (1 + tpPct/100) : price * (1 - tpPct/100)).toFixed(2);
+      const slPrice = +(direction === 'buy' ? price * (1 - slPct/100) : price * (1 + slPct/100)).toFixed(2);
+      // ── 3Commas Smart Trade v2 payload ──
+      const tradePayload = {
+        account_id: accountId,
+        pair,
+        position: {
+          type: direction,
+          units: { value: String(units) },
+          order_type: 'market',
+        },
+        take_profit: {
+          enabled: true,
+          steps: [{ order_type: 'market', price: { value: String(tpPrice), type: 'last' }, volume: '100' }],
+        },
+        stop_loss: {
+          enabled: true,
+          order_type: 'market',
+          conditional: { price: { value: String(slPrice), type: 'last' } },
+        },
+        note: 'R16/' + (body.strategy || 'TV') + '/' + new Date().toISOString().slice(0,10),
+      };
+      const fullPath = '/public/api/v2/smart_trades';
+      const bodyStr = JSON.stringify(tradePayload);
+      const sig = hmacSign(TC_SECRET, fullPath + bodyStr);
+      const r = await fetch('https://api.3commas.io' + fullPath, {
+        method: 'POST',
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: bodyStr,
+      });
+      const raw = await r.text();
+      let data; try { data = JSON.parse(raw); } catch { data = raw; }
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify({
+        success: r.ok, pair, direction, quoteAmount, units, tpPrice, slPrice,
+        smartTrade: data,
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── TradingView webhook receiver ──────────────────────────────
   // Configure in TV → Alert → Webhook URL: https://tc-proxy-eu.onrender.com/api/tv-webhook
   // Body (use TV alert message): JSON like {"secret":"<TV_WEBHOOK_SECRET env>","symbol":"BTCUSDT","action":"buy","strategy":"RSI_oversold","price":73000}

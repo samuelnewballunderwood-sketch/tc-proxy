@@ -98,6 +98,7 @@ const ALLOWLIST = [
   { actionType: 'deploy_grid', objective: 'idle_crypto_grid'    }, // R12: per-asset grid for held crypto
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
   { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
+  { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -105,6 +106,15 @@ let _lastGridCreatedAt = 0;
 const GRID_CREATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // In-flight create lock — prevents concurrent ticks from creating dupes per asset
 const _gridCreateInFlight = new Set();
+const _r16ProcessedAlertIds = new Set(); // session memory of acted-on alert timestamps
+let _r16DailyCount = 0;
+let _r16DayKey = '';
+function _r16CheckCap() {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _r16DayKey) { _r16DayKey = day; _r16DailyCount = 0; }
+  return _r16DailyCount < 2;
+}
+function _r16Increment() { _r16DailyCount++; }
 // Per (objective+asset) failed-attempt tracker — silences repeat-skip noise
 const _failedAttempts = new Map(); // key -> { count, firstTs }
 const FAIL_CAP = 3;
@@ -132,6 +142,37 @@ function isAllowed(d) {
 // ── Execute one decision ─────────────────────────────────────────────
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
+
+  // Special path: tv_signal (R16) — act on TradingView Bj Bot alert
+  if (decision.actionType === 'tv_signal' && decision.objective === 'tv_signal_act') {
+    if (!_r16CheckCap()) return [{ skipped: 'R16 daily cap reached (2/day)' }];
+    const alert = decision.payload?.alert;
+    if (!alert) return [{ error: 'no alert payload' }];
+    if (_r16ProcessedAlertIds.has(alert.ts)) return [{ skipped: 'alert already processed', ts: alert.ts }];
+    const direction = alert.action === 'buy' ? 'buy' : alert.action === 'sell' ? 'sell' : null;
+    if (!direction) return [{ skipped: 'unknown action ' + alert.action }];
+    const pair = alert.symbol === 'BTCUSDT' ? 'USDT_BTC'
+              : alert.symbol === 'ETHUSDT' ? 'USDT_ETH'
+              : alert.symbol === 'SOLUSDT' ? 'USDT_SOL'
+              : null;
+    if (!pair) return [{ skipped: 'unsupported symbol ' + alert.symbol }];
+    try {
+      const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pair, direction, quoteAmount: 100, takeProfitPct: 1.5, stopLossPct: 1.5,
+          strategy: alert.strategy || 'Bj_Bot',
+        }),
+      });
+      const raw = await r.text();
+      let body; try { body = JSON.parse(raw); } catch { body = raw; }
+      if (r.ok) {
+        _r16ProcessedAlertIds.add(alert.ts);
+        _r16Increment();
+      }
+      return [{ smartTradeCreated: r.ok, status: r.status, alert, response: body }];
+    } catch(e) { return [{ error: e.message }]; }
+  }
 
   // Special path: cancel_order (R15) — cancel stale spot orders
   if (decision.actionType === 'cancel_order' && decision.objective === 'stale_order_cancel') {
