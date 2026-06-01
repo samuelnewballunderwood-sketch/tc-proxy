@@ -96,6 +96,7 @@ const ALLOWLIST = [
   { actionType: 'enable',     objective: 'regime_lift'   },  // R2-LIFT: auto-resume DCAs when F&G recovers
   { actionType: 'deploy_grid', objective: 'idle_capital_deploy' }, // R9: auto-deploy idle USDT to BTC defensive grid
   { actionType: 'deploy_grid', objective: 'idle_crypto_grid'    }, // R12: per-asset grid for held crypto
+  { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -130,6 +131,22 @@ function isAllowed(d) {
 // ── Execute one decision ─────────────────────────────────────────────
 async function executeDecision(decision, openDealBotIds) {
   const results = [];
+
+  // Special path: redeem (R14) — call Binance Earn redemption
+  if (decision.actionType === 'redeem' && decision.objective === 'auto_redeem') {
+    const asset = decision.suggestedAsset || 'USDT';
+    const amount = parseFloat(decision.amount || 0);
+    if (!amount || amount <= 0) return [{ error: 'amount missing' }];
+    try {
+      const r = await fetch('https://tc-proxy-eu.onrender.com/api/binance-redeem-earn', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset, amount }),
+      });
+      const raw = await r.text();
+      let body; try { body = JSON.parse(raw); } catch { body = raw; }
+      return [{ redeemed: r.ok, status: r.status, asset, amount, body }];
+    } catch(e) { return [{ error: e.message }]; }
+  }
 
   // Special path: deploy_grid creates a NEW bot — no targetBotIds.
   if (decision.actionType === 'deploy_grid') {

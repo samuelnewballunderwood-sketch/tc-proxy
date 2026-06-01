@@ -1042,6 +1042,73 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Binance Simple Earn: list flexible positions ──────────────
+  if (req.method === 'GET' && url === '/api/binance-earn-positions') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const ts = Date.now();
+      const q = `timestamp=${ts}&recvWindow=10000`;
+      const sig = hmacSign(BN_SECRET, q);
+      const r = await fetch(`https://api.binance.com/sapi/v1/simple-earn/flexible/position?${q}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const data = await r.json();
+      res.statusCode = r.ok ? 200 : r.status;
+      res.end(JSON.stringify(data));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── Binance Simple Earn: redeem flexible product ──────────────
+  if (req.method === 'POST' && url === '/api/binance-redeem-earn') {
+    try {
+      if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
+      const body = JSON.parse(await readBody(req));
+      const asset = (body.asset || '').toUpperCase();
+      const amount = parseFloat(body.amount);
+      if (!asset || !amount || amount <= 0) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'asset and positive amount required' }));
+        return;
+      }
+      // 1. Find productId for asset
+      const ts1 = Date.now();
+      const q1 = `asset=${asset}&size=20&timestamp=${ts1}&recvWindow=10000`;
+      const sig1 = hmacSign(BN_SECRET, q1);
+      const listR = await fetch(`https://api.binance.com/sapi/v1/simple-earn/flexible/list?${q1}&signature=${sig1}`, {
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const listData = await listR.json();
+      if (listData.msg || listData.code) {
+        res.statusCode = listR.status || 400;
+        res.end(JSON.stringify({ error: 'flexible/list: ' + (listData.msg||listData.code), hint: 'Likely missing Simple Earn permission on API key' }));
+        return;
+      }
+      const product = (listData.rows || []).find(p => p.asset === asset);
+      if (!product) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'no flexible product for ' + asset }));
+        return;
+      }
+      // 2. Redeem
+      const ts2 = Date.now();
+      const q2 = `productId=${product.productId}&amount=${amount}&timestamp=${ts2}&recvWindow=10000`;
+      const sig2 = hmacSign(BN_SECRET, q2);
+      const redeemR = await fetch(`https://api.binance.com/sapi/v1/simple-earn/flexible/redeem?${q2}&signature=${sig2}`, {
+        method: 'POST',
+        headers: { 'X-MBX-APIKEY': BN_KEY }
+      });
+      const redeemData = await redeemR.json();
+      res.statusCode = redeemR.ok ? 200 : redeemR.status;
+      res.end(JSON.stringify({
+        success: redeemR.ok,
+        asset, amount, productId: product.productId,
+        result: redeemData,
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── DELETE a grid bot via 3Commas ─────────────────────────────────
   if (req.method === 'POST' && url.match(/^\/api\/grid-bot\/\d+\/delete$/)) {
     try {
