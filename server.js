@@ -1102,6 +1102,44 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── TEMP: dump raw 3Commas DCA bot fields for one bot (find reinvested formula) ──
+  if (req.method === 'GET' && url === '/api/dca-raw-dump') {
+    try {
+      async function tcFetch(path, qs='') {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        return fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        }).then(r => r.json());
+      }
+      // Bot 16806276 = SOL/USDT DCA Long (the champion, $94.95 PnL + $164.01 Reinv expected)
+      const id = 16806276;
+      const [listResp, detail] = await Promise.all([
+        tcFetch('/ver1/bots', 'limit=200&include_events=false'),
+        tcFetch('/ver1/bots/' + id + '/show', 'include_events=false'),
+      ]);
+      const fromList = Array.isArray(listResp) ? listResp.find(b => b.id === id) : null;
+      res.end(JSON.stringify({
+        bot_id: id,
+        from_list_fields: fromList ? Object.keys(fromList).sort() : null,
+        from_detail_fields: detail ? Object.keys(detail).sort() : null,
+        from_list_sample: fromList ? {
+          base_order_volume: fromList.base_order_volume,
+          finished_deals_count: fromList.finished_deals_count,
+          finished_deals_profit_usd: fromList.finished_deals_profit_usd,
+          active_deals_usd_profit: fromList.active_deals_usd_profit,
+          profit_currency: fromList.profit_currency,
+          total_profits_in_usd: fromList.total_profits_in_usd,
+          additional_funds: fromList.additional_funds,
+          funds: fromList.funds,
+          // Add everything that looks profit/funds-related
+        } : null,
+        detail_sample: detail,
+      }, null, 2));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── DCA bot detail (per-bot PnL + reinvested + ROI) ─────────────
   if (req.method === 'GET' && url === '/api/dca-detail') {
     try {
