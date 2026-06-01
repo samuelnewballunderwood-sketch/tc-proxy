@@ -1448,6 +1448,52 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Smart Trade tracker — Hannah's open + recent positions ──
+  if (req.method === 'GET' && url === '/api/smart-trades') {
+    try {
+      const TC_API_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
+      const TC_API_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
+      if (!TC_API_KEY || !TC_API_SECRET) { res.statusCode=500; res.end(JSON.stringify({error:'TC creds missing'})); return; }
+      async function tc3v2(path, qs) {
+        const fullPath = '/public/api/v2' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_API_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_API_KEY, 'Signature': sig, 'Accept': 'application/json' }
+        });
+        if (r.status === 204) return [];
+        const raw = await r.text();
+        try { return JSON.parse(raw); } catch { return []; }
+      }
+      const all = await tc3v2('/smart_trades', 'per_page=50&order_by=created_at&order_direction=desc');
+      const trades = Array.isArray(all) ? all : [];
+      // Filter to Hannah's (note field contains R16/R17/R18/R25 prefix or starts with R16/R18/R25)
+      const hannah = trades.filter(t => /^(R\d+|Hannah)/i.test(t.note||''));
+      const open  = hannah.filter(t => t.status?.type === 'waiting_targets' || t.status?.type === 'panic_sell_pending' || t.status?.basic_type === 'active');
+      const recent = hannah.filter(t => t.status?.type === 'finished' || t.status?.type === 'cancelled');
+      const summarize = (t) => ({
+        id: t.id,
+        pair: t.pair,
+        note: t.note,
+        direction: t.position?.type,
+        entry: parseFloat(t.position?.price?.value || 0),
+        units: parseFloat(t.position?.units?.value || 0),
+        currentProfit: parseFloat(t.profit?.usd || 0),
+        currentProfitPct: parseFloat(t.profit?.percent || 0),
+        status: t.status?.type || t.status?.basic_type,
+        createdAt: t.created_at,
+        closedAt: t.closed_at,
+      });
+      res.end(JSON.stringify({
+        total: hannah.length,
+        open: open.map(summarize),
+        recent: recent.slice(0, 20).map(summarize),
+        unrealizedTotal: +open.reduce((s,t) => s + (parseFloat(t.profit?.usd||0)), 0).toFixed(2),
+        realizedRecent: +recent.slice(0,20).reduce((s,t) => s + (parseFloat(t.profit?.usd||0)), 0).toFixed(2),
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── BTC perp funding rate (R18 input) ─────────────────────────
   if (req.method === 'GET' && url === '/api/funding-rate') {
     try {
