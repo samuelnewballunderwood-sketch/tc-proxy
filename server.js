@@ -144,8 +144,9 @@ WHEN YOU CAN'T ACT — say so explicitly
 If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no Free balance, tell Sam: "Your \$X in {asset} is locked in Earn, redeem it and I'll grid it within the next tick." Never just go silent. Always explain blockers in one sentence.`;
 
 
-// Last-good cache for total-capital (in-memory, survives until process restart)
+// Last-good cache for total-capital + deals summary (in-memory)
 let _lastGoodCapital = null;
+let _lastGoodDealsSummary = null;
 function hmacSign(secret, message) {
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
@@ -597,13 +598,30 @@ async function handleRequest(req, res) {
       ];
       const totalProfit  = deals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       const totalOrders  = deals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
-      res.end(JSON.stringify({
+      const payload = {
         completedDeals: deals.length,
         activeDeals:    0,
         totalOrders,
         totalProfit:    Math.round(totalProfit * 100) / 100,
-      }));
-    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+      };
+      // Cache last-good (when 3Commas returns real data, not throttled empty)
+      if (deals.length > 0 && payload.totalProfit > 0) {
+        _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
+        res.end(JSON.stringify(payload));
+      } else if (_lastGoodDealsSummary) {
+        // 3Commas returned empty (rate-limited or transient) — serve last-good
+        res.end(JSON.stringify({ ..._lastGoodDealsSummary, stale: true }));
+      } else {
+        res.end(JSON.stringify(payload));
+      }
+    } catch(e) {
+      if (_lastGoodDealsSummary) {
+        res.end(JSON.stringify({ ..._lastGoodDealsSummary, stale: true, error: e.message }));
+      } else {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    }
     return;
   }
 
