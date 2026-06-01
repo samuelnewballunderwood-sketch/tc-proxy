@@ -1109,6 +1109,56 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── TradingView webhook receiver ──────────────────────────────
+  // Configure in TV → Alert → Webhook URL: https://tc-proxy-eu.onrender.com/api/tv-webhook
+  // Body (use TV alert message): JSON like {"secret":"<TV_WEBHOOK_SECRET env>","symbol":"BTCUSDT","action":"buy","strategy":"RSI_oversold","price":73000}
+  if (req.method === 'POST' && url === '/api/tv-webhook') {
+    try {
+      const raw = await readBody(req);
+      let alert;
+      try { alert = JSON.parse(raw); } catch { alert = { raw }; }
+      const expectedSecret = process.env.TV_WEBHOOK_SECRET;
+      if (expectedSecret && alert.secret !== expectedSecret) {
+        res.statusCode = 401;
+        res.end(JSON.stringify({ error: 'invalid secret' }));
+        return;
+      }
+      // Forward to worker for persistent KV storage
+      const stored = {
+        ts: new Date().toISOString(),
+        symbol: alert.symbol || 'UNKNOWN',
+        action: alert.action || 'SIGNAL',
+        strategy: alert.strategy || '',
+        price: alert.price ?? null,
+        message: alert.message || alert.text || '',
+        raw: alert.secret ? { ...alert, secret: '***' } : alert,
+      };
+      // Persist to worker KV via existing log endpoint
+      try {
+        await fetch('https://alphacontrol.ai/api/log-action', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event: 'tv_alert', ...stored }),
+        });
+      } catch(_) {}
+      res.end(JSON.stringify({ success: true, stored }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
+  // ── TradingView recent alerts (last 50, last 24h) ────────────
+  if (req.method === 'GET' && url === '/api/tv-alerts') {
+    try {
+      const r = await fetch('https://alphacontrol.ai/api/hannah-actions');
+      const j = r.ok ? await r.json() : { actions: [] };
+      const since = Date.now() - 24*60*60*1000;
+      const alerts = (j.actions||[])
+        .filter(a => a.event === 'tv_alert' && new Date(a.ts).getTime() >= since)
+        .slice(0, 50);
+      res.end(JSON.stringify({ count: alerts.length, alerts }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   // ── Binance OPEN SPOT ORDERS — what's actually holding capital ──
   if (req.method === 'GET' && url === '/api/binance-open-orders') {
     try {
