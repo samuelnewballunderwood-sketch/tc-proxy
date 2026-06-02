@@ -665,6 +665,48 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /api/today-deals ─────────────────────────────────────────────────
+  // Count deals closed since midnight UTC today, across both accounts
+  if (req.method === 'GET' && url === '/api/today-deals') {
+    try {
+      function tcDealsFetch(accountId) {
+        const path = `/public/api/ver1/deals?limit=200&scope=completed&account_id=${accountId}`;
+        const sig = hmacSign(TC_SECRET, path);
+        return fetch('https://api.3commas.io' + path, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig }
+        }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
+      }
+      const [dealsSpot, dealsFut] = await Promise.all([
+        tcDealsFetch(33438577),
+        tcDealsFetch(33439515),
+      ]);
+      const all = [
+        ...(Array.isArray(dealsSpot) ? dealsSpot : []),
+        ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+      ];
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      const todayMs = todayUTC.getTime();
+      const today = all.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
+      const todayProfit = today.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const byBot = {};
+      for (const d of today) {
+        const name = d.bot_name || d.bot_id || 'unknown';
+        byBot[name] = (byBot[name] || 0) + 1;
+      }
+      res.end(JSON.stringify({
+        count: today.length,
+        profit: Math.round(todayProfit * 100) / 100,
+        byBot,
+        asOf: new Date().toISOString(),
+        windowStart: todayUTC.toISOString(),
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message, count: 0 }));
+    }
+    return;
+  }
+
   // ── GET /market-signals ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/market-signals') {
     try {
