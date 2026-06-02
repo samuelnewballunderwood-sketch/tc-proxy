@@ -119,7 +119,7 @@ const ALLOWLIST = [
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
   { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
   { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
-  // R17 fear_accumulate removed from ALLOWLIST — hold-style, conflicts with scalp mandate
+  { actionType: 'spot_buy',    objective: 'fear_accumulate' }, // R17: F&G extreme fear small accumulate
   { actionType: 'close_grid',  objective: 'grid_profit_take'  }, // R19: profit-take Hannah grid
   { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
@@ -151,10 +151,11 @@ function _discStatus() {
   if (day !== _discDayKey) { return { day, spentUsd: 0, capUsd: DISCRETIONARY_DAILY_CAP_USD }; }
   return { day: _discDayKey, spentUsd: _discSpendUsd, capUsd: DISCRETIONARY_DAILY_CAP_USD };
 }
+const R17_DAILY_CAP = parseInt(process.env.R17_DAILY_CAP || '5', 10);
 function _r17CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r17DayKey) { _r17DayKey = day; _r17DailyCount = 0; }
-  return _r17DailyCount < 1;
+  return _r17DailyCount < R17_DAILY_CAP;
 }
 function _r17Increment() { _r17DailyCount++; }
 function _r16CheckCap() {
@@ -198,8 +199,8 @@ async function executeDecision(decision, openDealBotIds) {
     const isR25 = decision.objective === 'momentum_scalp';
     const isR17 = decision.objective === 'fear_accumulate';
     const isR30 = decision.objective === 'liq_cascade_buy';
-    if (isR17) return [{ skipped: 'R17 holds disabled — Hannah is scalp-only. R17 fires as advisory.' }];
-    if (!isR18 && !isR25 && !isR30) return [{ note: 'spot_buy objective not in scalp mode: ' + decision.objective }];
+    if (!isR17 && !isR18 && !isR25 && !isR30) return [{ note: 'spot_buy objective not handled: ' + decision.objective }];
+    if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (' + _r17DailyCount + '/' + R17_DAILY_CAP + ')', dayKey: _r17DayKey }];
     const amt = parseFloat(decision.amount || 50);
     if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
@@ -207,9 +208,11 @@ async function executeDecision(decision, openDealBotIds) {
     // R18 reads direction from the decision text (sell or buy)
     // Scalp mode: tight targets, fast in-out
     const direction = (isR18 || isR25) && /SELL/i.test(decision.text || '') ? 'sell' : 'buy';
-    const tpPct = isR18 ? 0.5 : isR25 ? 0.6 : isR30 ? 0.7 : 0.8;
-    const slPct = isR18 ? 0.7 : isR25 ? 0.8 : isR30 ? 0.9 : 1.0;
-    const strat = isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : isR30 ? 'R30_liq_hunter' : 'unknown';
+    // R17 = fear accumulate (wider targets, hold longer than scalp)
+    // Others = scalp (tight TP/SL)
+    const tpPct = isR17 ? 2.0 : isR18 ? 0.5 : isR25 ? 0.6 : isR30 ? 0.7 : 0.8;
+    const slPct = isR17 ? 1.5 : isR18 ? 0.7 : isR25 ? 0.8 : isR30 ? 0.9 : 1.0;
+    const strat = isR17 ? 'R17_fear_accumulate' : isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : isR30 ? 'R30_liq_hunter' : 'unknown';
     try {
       const r = await fetch('https://tc-proxy-eu.onrender.com/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
