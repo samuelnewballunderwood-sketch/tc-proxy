@@ -58,6 +58,17 @@ function hmacSign(secret, path) {
   return crypto.createHmac('sha256', secret).update(path).digest('hex');
 }
 
+// Fetch with hard timeout — never let tick() hang on a slow upstream
+async function _fetchT(url, opts = {}, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function tc3(method, path, qs) {
   const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
   const sig = hmacSign(TC_SECRET, fullPath);
@@ -266,10 +277,10 @@ async function executeDecision(decision, openDealBotIds) {
     const guard = _r31CheckCanTune(botId);
     if (!guard.ok) return [{ skipped: 'R31 ' + guard.reason, botId }];
     try {
-      const r = await fetch('https://tc-proxy-eu.onrender.com/api/tune-bot', {
+      const r = await _fetchT('https://tc-proxy-eu.onrender.com/api/tune-bot', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ botId, takeProfitPct: newTp }),
-      });
+      }, 30000);
       const body = await r.json();
       if (r.ok && body.success) {
         _r31RecordTune(botId);
@@ -447,7 +458,7 @@ async function executeDecision(decision, openDealBotIds) {
 // ── Adaptive cadence by regime ───────────────────────────────────────
 async function nextDelayMs() {
   try {
-    const r = await fetch(WORKER_BASE + '/api/portfolio');
+    const r = await _fetchT(WORKER_BASE + '/api/portfolio', {}, 5000);
     const j = await r.json();
     const regime = (j?.market?.regime || '').toLowerCase();
     if (regime.includes('bear')) return  60 * 1000;        // 1 min — high vigilance
@@ -469,7 +480,7 @@ async function tick() {
       return;
     }
 
-    const dRes = await fetch(WORKER_BASE + '/api/decisions');
+    const dRes = await _fetchT(WORKER_BASE + '/api/decisions', {}, 20000);
     if (!dRes.ok) {
       logEvent({ event: 'fetch_decisions_failed', status: dRes.status });
       return;
@@ -480,8 +491,8 @@ async function tick() {
     // Guards: (a) only write if locked > 0, (b) only overwrite if new value >= existing (high-water-mark)
     try {
       const [snapR, dealsR] = await Promise.all([
-        fetch(WORKER_BASE + '/api/daily-snapshot'),
-        fetch('https://tc-proxy-eu.onrender.com/deals/summary'),
+        _fetchT(WORKER_BASE + '/api/daily-snapshot', {}, 10000),
+        _fetchT('https://tc-proxy-eu.onrender.com/deals/summary', {}, 10000),
       ]);
       const snapJ = snapR.ok ? await snapR.json() : null;
       const dealsJ = dealsR.ok ? await dealsR.json() : null;
@@ -491,10 +502,10 @@ async function tick() {
       if (canonicalLocked > 0 && canonicalLocked >= existingLocked - 1) {
         // Only log if value actually changed materially
         const changed = Math.abs(canonicalLocked - existingLocked) > 0.5;
-        await fetch(WORKER_BASE + '/api/daily-snapshot', {
+        await _fetchT(WORKER_BASE + '/api/daily-snapshot', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ locked: canonicalLocked }),
-        });
+        }, 10000);
         if (changed) logEvent({ event: 'daily_snapshot_written', locked: canonicalLocked, prev: existingLocked });
       }
     } catch (_) {}
@@ -531,10 +542,31 @@ async function tick() {
     lastTickError = String(e);
     logEvent({ event: 'tick_error', error: String(e) });
   } finally {
-    const ms = await nextDelayMs();
-    setTimeout(tick, ms);
+    try {
+      const ms = await Promise.race([
+        nextDelayMs(),
+        new Promise(r => setTimeout(() => r(60_000), 6000)), // hard fallback: 60s default if nextDelayMs is slow
+      ]);
+      setTimeout(tick, ms);
+    } catch (_) {
+      setTimeout(tick, 60_000);
+    }
   }
 }
+
+// Watchdog: every 90s, if tick hasn't fired recently, kick a fresh one.
+// Prevents permanent stalls if the main loop is somehow lost.
+setInterval(() => {
+  try {
+    const lastMs = lastTickAt ? new Date(lastTickAt).getTime() : 0;
+    const ageMs = Date.now() - lastMs;
+    if (ageMs > 90_000) {
+      logEvent({ event: 'watchdog_kick', ageMs });
+      // Don't await — fire and continue
+      tick().catch(e => logEvent({ event: 'watchdog_kick_failed', error: String(e) }));
+    }
+  } catch (_) {}
+}, 60_000);
 
 // ── Public API exposed via server.js ────────────────────────────────
 function getActions(limit) {
