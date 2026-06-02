@@ -648,20 +648,31 @@ async function handleRequest(req, res) {
       const totalOrders  = dcaDeals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
       const totalProfit = dcaProfit + gridTotalProfit;
       const totalDeals = dcaDeals.length + gridTotalDeals;
+      // High-water-mark: prefer cached value when fresh fetch returned a lower count (likely partial)
+      const cachedDca = _lastGoodDealsSummary?.dcaDeals || 0;
+      const cachedDcaP = _lastGoodDealsSummary?.dcaProfit || 0;
+      const cachedGrid = _lastGoodDealsSummary?.gridDeals || 0;
+      const cachedGridP = _lastGoodDealsSummary?.gridProfit || 0;
+      const mergedDca = Math.max(dcaDeals.length, cachedDca);
+      const mergedDcaP = Math.max(Math.round(dcaProfit * 100) / 100, cachedDcaP);
+      const mergedGrid = Math.max(gridTotalDeals, cachedGrid);
+      const mergedGridP = Math.max(Math.round(gridTotalProfit * 100) / 100, cachedGridP);
+      const mergedTotalDeals = mergedDca + mergedGrid;
+      const mergedTotalProfit = Math.round((mergedDcaP + mergedGridP) * 100) / 100;
       const payload = {
-        completedDeals: totalDeals,
-        dcaDeals: dcaDeals.length,
-        gridDeals: gridTotalDeals,
+        completedDeals: mergedTotalDeals,
+        dcaDeals: mergedDca,
+        gridDeals: mergedGrid,
         activeDeals:    0,
         totalOrders,
-        totalProfit:    Math.round(totalProfit * 100) / 100,
-        dcaProfit:      Math.round(dcaProfit * 100) / 100,
-        gridProfit:     Math.round(gridTotalProfit * 100) / 100,
+        totalProfit:    mergedTotalProfit,
+        dcaProfit:      mergedDcaP,
+        gridProfit:     mergedGridP,
       };
       // Also keep backward compat: old code may reference `deals.length`
       const deals = dcaDeals;
-      // Cache last-good (when 3Commas returns real data, not throttled empty)
-      if (deals.length > 0 && payload.totalProfit > 0) {
+      // Cache last-good (save when either DCA or Grid returned real data)
+      if ((dcaDeals.length > 0 || gridTotalDeals > 0) && payload.totalProfit > 0) {
         _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
         _kvSnapshot();
         res.end(JSON.stringify(payload));
