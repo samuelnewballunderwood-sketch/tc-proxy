@@ -147,6 +147,44 @@ If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no
 // Last-good cache for total-capital + deals summary (in-memory)
 let _lastGoodCapital = null;
 let _lastGoodDealsSummary = null;
+let _kvHydrated = false;
+
+const KV_PORTFOLIO_URL = 'https://alphacontrol.ai/api/cache/portfolio';
+
+// Read shared KV cache (called once on cold start; idempotent thereafter)
+async function _kvHydrate() {
+  if (_kvHydrated) return;
+  _kvHydrated = true;
+  try {
+    const r = await fetch(KV_PORTFOLIO_URL);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data && !data.empty) {
+      if (data.totalCapital > 100 && !_lastGoodCapital) {
+        _lastGoodCapital = { total: data.totalCapital, source: '3commas-portfolio', asOf: data.capitalAsOf };
+      }
+      if (data.dealsSummary?.totalProfit > 0 && !_lastGoodDealsSummary) {
+        _lastGoodDealsSummary = data.dealsSummary;
+      }
+      console.log('[KV] hydrated cache:', { cap: data.totalCapital, dealsProfit: data.dealsSummary?.totalProfit });
+    }
+  } catch (e) { console.warn('[KV] hydrate failed:', e.message); }
+}
+
+// Write shared KV cache (fire-and-forget after successful fetch)
+function _kvSnapshot() {
+  const body = {
+    totalCapital: _lastGoodCapital?.total,
+    capitalAsOf: _lastGoodCapital?.asOf,
+    dealsSummary: _lastGoodDealsSummary,
+  };
+  if (!body.totalCapital && !body.dealsSummary) return;
+  fetch(KV_PORTFOLIO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(e => console.warn('[KV] snapshot save failed:', e.message));
+}
 function hmacSign(secret, message) {
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
@@ -581,6 +619,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
+      await _kvHydrate();
       function tcDealsFetch(accountId) {
         const path = `/public/api/ver1/deals?limit=1000&scope=completed&account_id=${accountId}`;
         const sig = hmacSign(TC_SECRET, path);
@@ -607,6 +646,7 @@ async function handleRequest(req, res) {
       // Cache last-good (when 3Commas returns real data, not throttled empty)
       if (deals.length > 0 && payload.totalProfit > 0) {
         _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
+        _kvSnapshot();
         res.end(JSON.stringify(payload));
       } else if (_lastGoodDealsSummary) {
         // 3Commas returned empty (rate-limited or transient) — serve last-good
@@ -1981,6 +2021,7 @@ async function handleRequest(req, res) {
   // IP bans because 3Commas API is independent.
   if (req.method === 'GET' && url === '/api/total-capital') {
     try {
+      await _kvHydrate();
       async function tcFetch(path, qs='') {
         const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
         const sig = hmacSign(TC_SECRET, fullPath);
@@ -2044,6 +2085,7 @@ async function handleRequest(req, res) {
       // Cache last good (only if from 3Commas, the canonical source)
       if (source === '3commas-portfolio' && total > 100) {
         _lastGoodCapital = { total, source: '3commas-portfolio', asOf: payload.asOf };
+        _kvSnapshot();
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
