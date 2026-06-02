@@ -620,29 +620,41 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/deals/summary') {
     try {
       await _kvHydrate();
-      function tcDealsFetch(accountId) {
-        const path = `/public/api/ver1/deals?limit=1000&scope=completed&account_id=${accountId}`;
+      function tcFetch(path) {
         const sig = hmacSign(TC_SECRET, path);
         return fetch('https://api.3commas.io' + path, {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut] = await Promise.all([
-        tcDealsFetch(33438577),
-        tcDealsFetch(33439515),
+      const [dealsSpot, dealsFut, gridBots] = await Promise.all([
+        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33438577'),
+        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33439515'),
+        tcFetch('/public/api/ver1/grid_bots?limit=200'),
       ]);
-      const deals = [
+      const dcaDeals = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
       ];
-      const totalProfit  = deals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
-      const totalOrders  = deals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
+      const dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      // Grid bot deals: sum finished_deals_count + total_profit across all grids
+      const grids = Array.isArray(gridBots) ? gridBots : [];
+      const gridTotalDeals = grids.reduce((s, g) => s + parseInt(g.finished_deals_count || 0), 0);
+      const gridTotalProfit = grids.reduce((s, g) => s + parseFloat(g.total_profit || 0), 0);
+      const totalOrders  = dcaDeals.reduce((s, d) => s + parseInt(d.completed_manual_safety_orders_count || 0) + parseInt(d.completed_safety_orders_count || 0) + 1, 0);
+      const totalProfit = dcaProfit + gridTotalProfit;
+      const totalDeals = dcaDeals.length + gridTotalDeals;
       const payload = {
-        completedDeals: deals.length,
+        completedDeals: totalDeals,
+        dcaDeals: dcaDeals.length,
+        gridDeals: gridTotalDeals,
         activeDeals:    0,
         totalOrders,
         totalProfit:    Math.round(totalProfit * 100) / 100,
+        dcaProfit:      Math.round(dcaProfit * 100) / 100,
+        gridProfit:     Math.round(gridTotalProfit * 100) / 100,
       };
+      // Also keep backward compat: old code may reference `deals.length`
+      const deals = dcaDeals;
       // Cache last-good (when 3Commas returns real data, not throttled empty)
       if (deals.length > 0 && payload.totalProfit > 0) {
         _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
@@ -666,36 +678,54 @@ async function handleRequest(req, res) {
   }
 
   // ── GET /api/today-deals ─────────────────────────────────────────────────
-  // Count deals closed since midnight UTC today, across both accounts
+  // Count closes since midnight UTC today across DCA + Smart Trades + Grid profit
   if (req.method === 'GET' && url === '/api/today-deals') {
     try {
-      function tcDealsFetch(accountId) {
-        const path = `/public/api/ver1/deals?limit=200&scope=completed&account_id=${accountId}`;
+      function tcFetchOne(path) {
         const sig = hmacSign(TC_SECRET, path);
         return fetch('https://api.3commas.io' + path, {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut] = await Promise.all([
-        tcDealsFetch(33438577),
-        tcDealsFetch(33439515),
+      const [dealsSpot, dealsFut, gridBots] = await Promise.all([
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/grid_bots?limit=200'),
       ]);
-      const all = [
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      const todayMs = todayUTC.getTime();
+
+      // DCA deals closed today
+      const allDca = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
       ];
-      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
-      const todayMs = todayUTC.getTime();
-      const today = all.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
-      const todayProfit = today.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const todayDca = allDca.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
+      const dcaCount = todayDca.length;
+      const dcaProfit = todayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+
+      // Grid bots: today profit only (per-day count not exposed by API)
+      const grids = Array.isArray(gridBots) ? gridBots : [];
+      const gridLifetime = grids.reduce((s, g) => s + parseInt(g.finished_deals_count || 0), 0);
+      const gridProfit = grids.reduce((s, g) => s + parseFloat(g.total_profit_today || g.profit_today || 0), 0);
+
+      // By-bot breakdown (DCA only — grids don't expose per-day deal counts)
       const byBot = {};
-      for (const d of today) {
-        const name = d.bot_name || d.bot_id || 'unknown';
+      for (const d of todayDca) {
+        const name = d.bot_name || ('DCA-' + d.bot_id);
         byBot[name] = (byBot[name] || 0) + 1;
       }
+
+      const todayCount = dcaCount;  // DCA count is the only confirmed daily count
+      const todayProfit = dcaProfit + gridProfit;
+
       res.end(JSON.stringify({
-        count: today.length,
+        count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
+        breakdown: {
+          dca:  { count: dcaCount, profit: Math.round(dcaProfit * 100) / 100 },
+          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: gridLifetime, note: 'per-day grid count requires daily snapshot — profit_today summed' },
+        },
         byBot,
         asOf: new Date().toISOString(),
         windowStart: todayUTC.toISOString(),
