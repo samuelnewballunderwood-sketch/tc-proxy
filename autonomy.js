@@ -136,6 +136,7 @@ const ALLOWLIST = [
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
   { actionType: 'spot_buy',    objective: 'liq_cascade_buy'  }, // R30: buy wick after liquidation cascade
   { actionType: 'tune_bot',    objective: 'tune_tp'           }, // R31: auto-tune DCA take-profit % per regime
+  { actionType: 'tune_bot',    objective: 'tune_step'         }, // R32: auto-tune DCA safety-order step % per regime
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -170,6 +171,29 @@ const R31_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6h between tunes per bot
 const R31_DAILY_CAP_PER_BOT = 2;              // max 2 tunes per bot per day
 const _r31LastTuneAt = new Map();             // botId -> ms timestamp
 const _r31DailyCount = new Map();             // botId -> {day, count}
+// R32 step tuner — separate cooldown from R31 (you can tune TP and SO step the same day on different ticks)
+const _r32LastTuneAt = new Map();
+const _r32DailyCount = new Map();
+function _r32CheckCanTune(botId) {
+  const day = new Date().toISOString().slice(0,10);
+  const last = _r32LastTuneAt.get(botId) || 0;
+  if ((Date.now() - last) < R31_COOLDOWN_MS) {
+    const minsLeft = Math.ceil((R31_COOLDOWN_MS - (Date.now() - last)) / 60000);
+    return { ok: false, reason: 'cooldown: ' + minsLeft + 'm remaining' };
+  }
+  const dc = _r32DailyCount.get(botId);
+  if (dc && dc.day === day && dc.count >= R31_DAILY_CAP_PER_BOT) {
+    return { ok: false, reason: 'daily cap reached (' + dc.count + '/' + R31_DAILY_CAP_PER_BOT + ')' };
+  }
+  return { ok: true };
+}
+function _r32RecordTune(botId) {
+  const day = new Date().toISOString().slice(0,10);
+  _r32LastTuneAt.set(botId, Date.now());
+  const dc = _r32DailyCount.get(botId);
+  if (!dc || dc.day !== day) _r32DailyCount.set(botId, { day, count: 1 });
+  else _r32DailyCount.set(botId, { day, count: dc.count + 1 });
+}
 function _r31CheckCanTune(botId) {
   const day = new Date().toISOString().slice(0,10);
   // Cooldown check
@@ -284,6 +308,27 @@ async function executeDecision(decision, openDealBotIds) {
       const body = await r.json();
       if (r.ok && body.success) {
         _r31RecordTune(botId);
+        return [{ tuned: true, botId, change: body.change, name: body.name }];
+      }
+      return [{ tuned: false, botId, status: r.status, error: body?.error || 'unknown' }];
+    } catch(e) { return [{ tuned: false, botId, error: e.message }]; }
+  }
+
+  // Special path: tune_bot (R32) — auto-tune DCA safety-order step %
+  if (decision.actionType === 'tune_bot' && decision.objective === 'tune_step') {
+    const botId = (decision.targetBotIds || [])[0];
+    const newStep = decision.tuneParams?.safetyOrderStepPct;
+    if (!botId || !newStep) return [{ skipped: 'R32: missing botId or safetyOrderStepPct in decision' }];
+    const guard = _r32CheckCanTune(botId);
+    if (!guard.ok) return [{ skipped: 'R32 ' + guard.reason, botId }];
+    try {
+      const r = await _fetchT('https://tc-proxy-eu.onrender.com/api/tune-bot', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botId, safetyOrderStepPct: newStep }),
+      }, 30000);
+      const body = await r.json();
+      if (r.ok && body.success) {
+        _r32RecordTune(botId);
         return [{ tuned: true, botId, change: body.change, name: body.name }];
       }
       return [{ tuned: false, botId, status: r.status, error: body?.error || 'unknown' }];
@@ -589,10 +634,12 @@ async function manualExecute(decision) {
 setTimeout(tick, 10_000);
 
 function resetCooldowns() {
-  const before = { fail: _failedAttempts.size, r31: _r31LastTuneAt.size };
+  const before = { fail: _failedAttempts.size, r31: _r31LastTuneAt.size, r32: _r32LastTuneAt.size };
   _failedAttempts.clear();
   _r31LastTuneAt.clear();
   _r31DailyCount.clear();
+  _r32LastTuneAt.clear();
+  _r32DailyCount.clear();
   logEvent({ event: 'cooldowns_reset', before });
   return before;
 }
