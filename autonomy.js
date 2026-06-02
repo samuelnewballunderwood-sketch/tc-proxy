@@ -124,6 +124,7 @@ const ALLOWLIST = [
   { actionType: 'spot_buy',    objective: 'funding_contrarian'}, // R18: funding-rate mean-reversion
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
   { actionType: 'spot_buy',    objective: 'liq_cascade_buy'  }, // R30: buy wick after liquidation cascade
+  { actionType: 'tune_bot',    objective: 'tune_tp'           }, // R31: auto-tune DCA take-profit % per regime
 ];
 
 // Track the last auto-grid creation to enforce daily cap
@@ -152,6 +153,35 @@ function _discStatus() {
   return { day: _discDayKey, spentUsd: _discSpendUsd, capUsd: DISCRETIONARY_DAILY_CAP_USD };
 }
 const R17_DAILY_CAP = parseInt(process.env.R17_DAILY_CAP || '5', 10);
+
+// R31 tuner: per-bot cooldown + daily cap
+const R31_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6h between tunes per bot
+const R31_DAILY_CAP_PER_BOT = 2;              // max 2 tunes per bot per day
+const _r31LastTuneAt = new Map();             // botId -> ms timestamp
+const _r31DailyCount = new Map();             // botId -> {day, count}
+function _r31CheckCanTune(botId) {
+  const day = new Date().toISOString().slice(0,10);
+  // Cooldown check
+  const last = _r31LastTuneAt.get(botId) || 0;
+  if ((Date.now() - last) < R31_COOLDOWN_MS) {
+    const minsLeft = Math.ceil((R31_COOLDOWN_MS - (Date.now() - last)) / 60000);
+    return { ok: false, reason: 'cooldown: ' + minsLeft + 'm remaining' };
+  }
+  // Daily cap check (reset on day change)
+  const dc = _r31DailyCount.get(botId);
+  if (dc && dc.day === day && dc.count >= R31_DAILY_CAP_PER_BOT) {
+    return { ok: false, reason: 'daily cap reached (' + dc.count + '/' + R31_DAILY_CAP_PER_BOT + ')' };
+  }
+  return { ok: true };
+}
+function _r31RecordTune(botId) {
+  const day = new Date().toISOString().slice(0,10);
+  _r31LastTuneAt.set(botId, Date.now());
+  const dc = _r31DailyCount.get(botId);
+  if (!dc || dc.day !== day) _r31DailyCount.set(botId, { day, count: 1 });
+  else _r31DailyCount.set(botId, { day, count: dc.count + 1 });
+}
+
 function _r17CheckCap() {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _r17DayKey) { _r17DayKey = day; _r17DailyCount = 0; }
@@ -226,6 +256,27 @@ async function executeDecision(decision, openDealBotIds) {
       if (r.ok) _discAdd(amt);
       return [{ smartTradeCreated: r.ok, status: r.status, amount, direction, response: body }];
     } catch(e) { return [{ error: e.message }]; }
+  }
+
+  // Special path: tune_bot (R31) — auto-tune DCA take-profit %
+  if (decision.actionType === 'tune_bot' && decision.objective === 'tune_tp') {
+    const botId = (decision.targetBotIds || [])[0];
+    const newTp = decision.tuneParams?.takeProfitPct;
+    if (!botId || !newTp) return [{ skipped: 'R31: missing botId or takeProfitPct in decision' }];
+    const guard = _r31CheckCanTune(botId);
+    if (!guard.ok) return [{ skipped: 'R31 ' + guard.reason, botId }];
+    try {
+      const r = await fetch('https://tc-proxy-eu.onrender.com/api/tune-bot', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botId, takeProfitPct: newTp }),
+      });
+      const body = await r.json();
+      if (r.ok && body.success) {
+        _r31RecordTune(botId);
+        return [{ tuned: true, botId, change: body.change, name: body.name }];
+      }
+      return [{ tuned: false, botId, status: r.status, error: body?.error || 'unknown' }];
+    } catch(e) { return [{ tuned: false, botId, error: e.message }]; }
   }
 
   // Special path: close_grid (R19) — profit-take Hannah grid
