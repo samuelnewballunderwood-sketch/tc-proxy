@@ -2131,6 +2131,96 @@ async function handleRequest(req, res) {
     res.end(JSON.stringify({ actions: autonomy.getActions(limit) }));
     return;
   }
+  // ── GET /api/insufficient-funds — group fund-related failures by bot/rule
+  if (req.method === 'GET' && url === '/api/insufficient-funds') {
+    try {
+      // Pull persistent KV-backed action log from worker (survives Render restarts)
+      const histR = await fetch('https://alphacontrol.ai/api/hannah-actions').catch(() => null);
+      const hist = histR && histR.ok ? await histR.json() : { actions: [] };
+      const inMem = autonomy.getActions(200);
+      const allActions = [...inMem, ...((hist && hist.actions) || [])];
+      // Dedupe by ts+event
+      const seen = new Set();
+      const acts = allActions.filter(a => {
+        const k = a.ts + ':' + (a.event || '') + ':' + (a.decision?.text || '');
+        if (seen.has(k)) return false; seen.add(k); return true;
+      });
+      // Filter last 24h
+      const since = Date.now() - 24*60*60*1000;
+      const recent = acts.filter(a => new Date(a.ts).getTime() >= since);
+
+      // Patterns identifying fund-related failure (NOT safety caps like discretionary)
+      const FUND_PATTERNS = [
+        /insufficient.*(?:balance|funds|base.*order|amount)/i,
+        /low.*(?:free|spot).*balance/i,
+        /not.*enough.*balance/i,
+        /-2010|-2019/,  // Binance error codes for balance issues
+        /MIN_NOTIONAL/i,
+        /insufficient_funds/i,
+        /no_balance/i,
+        /idle.*USDT.*low/i,
+      ];
+      // Patterns to EXCLUDE (these are safety caps, not capital shortages)
+      const SAFETY_CAP_PATTERNS = [
+        /discretionary.*daily.*cap/i,
+        /signal.*fund.*daily.*cap/i,
+        /R17.*daily.*cap/i,
+        /R16.*daily.*cap/i,
+        /cooldown/i,
+        /already processed/i,
+      ];
+
+      const failures = [];
+      for (const a of recent) {
+        const results = a.results || [];
+        for (const r of results) {
+          const reason = String(r.skipped || r.error || r.note || r.body?.error || r.body?.message || '');
+          if (!reason) continue;
+          // Skip if it's a safety cap
+          if (SAFETY_CAP_PATTERNS.some(p => p.test(reason))) continue;
+          if (!FUND_PATTERNS.some(p => p.test(reason))) continue;
+          failures.push({
+            ts: a.ts,
+            objective: a.decision?.objective || a.event,
+            text: (a.decision?.text || '').slice(0, 80),
+            asset: a.decision?.suggestedAsset || (r.botId ? 'bot:' + r.botId : 'unknown'),
+            botId: r.botId || (a.decision?.targetBotIds || [])[0] || null,
+            reason: reason.slice(0, 120),
+          });
+        }
+      }
+
+      // Group by bot/rule
+      const byBot = {};
+      const byRule = {};
+      const byAsset = {};
+      const byReason = {};
+      for (const f of failures) {
+        const botKey = f.botId ? String(f.botId) : 'no-bot';
+        byBot[botKey] = (byBot[botKey] || 0) + 1;
+        byRule[f.objective] = (byRule[f.objective] || 0) + 1;
+        byAsset[f.asset] = (byAsset[f.asset] || 0) + 1;
+        const shortReason = f.reason.slice(0, 50);
+        byReason[shortReason] = (byReason[shortReason] || 0) + 1;
+      }
+
+      res.end(JSON.stringify({
+        total: failures.length,
+        windowHours: 24,
+        byBot,
+        byRule,
+        byAsset,
+        byReason,
+        recent: failures.slice(0, 10),
+        asOf: new Date().toISOString(),
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message, total: 0 }));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && url === '/api/signal-fund-status') {
     // Lifetime P&L from Smart Trades tagged as signal (R16/R17/R25/R30 use these notes)
     try {
