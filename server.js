@@ -2131,6 +2131,52 @@ async function handleRequest(req, res) {
     res.end(JSON.stringify({ actions: autonomy.getActions(limit) }));
     return;
   }
+  if (req.method === 'GET' && url === '/api/signal-fund-status') {
+    // Lifetime P&L from Smart Trades tagged as signal (R16/R17/R25/R30 use these notes)
+    try {
+      const path = '/public/api/v2/smart_trades?status=finished&per_page=200';
+      const sig = hmacSign(TC_SECRET, path);
+      const r = await fetch('https://api.3commas.io' + path, {
+        headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
+      });
+      const data = await r.ok ? await r.json() : null;
+      const items = (data && (data.items || (Array.isArray(data) ? data : []))) || [];
+      // Filter to signal-tagged trades by note prefix
+      const signalTrades = items.filter(t => {
+        const note = t.note || t.note_raw || '';
+        return /^(R16|R17|R18|R25|R30)/.test(note) || /SIGNAL\//.test(note);
+      });
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      const todayMs = todayUTC.getTime();
+      const lifetimePnL = signalTrades.reduce((s, t) => s + parseFloat(t.profit?.usd || 0), 0);
+      const todayTrades = signalTrades.filter(t => {
+        const ts = t.closed_at || t.updated_at;
+        return ts && new Date(ts).getTime() >= todayMs;
+      });
+      const todayPnL = todayTrades.reduce((s, t) => s + parseFloat(t.profit?.usd || 0), 0);
+      const winCount = signalTrades.filter(t => parseFloat(t.profit?.usd || 0) > 0).length;
+      const lossCount = signalTrades.filter(t => parseFloat(t.profit?.usd || 0) < 0).length;
+      const winRate = signalTrades.length > 0 ? (winCount / signalTrades.length * 100) : 0;
+      const status = autonomy.getStatus();
+      res.end(JSON.stringify({
+        allocation: status.signalFund?.allocationUsd || 1000,
+        dailyCap: status.signalFund?.capUsd || 300,
+        dailySpent: status.signalFund?.spentUsd || 0,
+        dailyAvailable: status.signalFund?.available || 300,
+        todayTrades: todayTrades.length,
+        todayPnL: Math.round(todayPnL * 100) / 100,
+        lifetimeTrades: signalTrades.length,
+        lifetimePnL: Math.round(lifetimePnL * 100) / 100,
+        winRate: Math.round(winRate * 10) / 10,
+        winCount, lossCount,
+        asOf: new Date().toISOString(),
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/autonomy-status') {
     res.end(JSON.stringify(autonomy.getStatus()));
     return;

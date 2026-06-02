@@ -153,6 +153,24 @@ let _r17DayKey = '';
 const DISCRETIONARY_DAILY_CAP_USD = parseFloat(process.env.DISCRETIONARY_DAILY_CAP_USD || '500');
 let _discSpendUsd = 0;
 let _discDayKey = '';
+
+// SIGNAL FUND — isolated sub-portfolio for signal-driven trading (R16/R25/R30 + future signal rules)
+// Caps prevent signal strategy losses from contaminating the core DCA+Grid base.
+const SIGNAL_FUND_ALLOCATION_USD = parseFloat(process.env.SIGNAL_FUND_ALLOCATION_USD || '1000');  // total earmarked
+const SIGNAL_DAILY_CAP_USD = parseFloat(process.env.SIGNAL_DAILY_CAP_USD || '300');  // max spend per day
+let _signalSpendUsd = 0;
+let _signalDayKey = '';
+function _signalCheck(amount) {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _signalDayKey) { _signalDayKey = day; _signalSpendUsd = 0; }
+  return (_signalSpendUsd + amount) <= SIGNAL_DAILY_CAP_USD;
+}
+function _signalAdd(amount) { _signalSpendUsd += amount; }
+function _signalStatus() {
+  const day = new Date().toISOString().slice(0,10);
+  if (day !== _signalDayKey) { return { day, spentUsd: 0, capUsd: SIGNAL_DAILY_CAP_USD, allocationUsd: SIGNAL_FUND_ALLOCATION_USD, available: SIGNAL_DAILY_CAP_USD }; }
+  return { day: _signalDayKey, spentUsd: _signalSpendUsd, capUsd: SIGNAL_DAILY_CAP_USD, allocationUsd: SIGNAL_FUND_ALLOCATION_USD, available: SIGNAL_DAILY_CAP_USD - _signalSpendUsd };
+}
 function _discCheck(amount) {
   const day = new Date().toISOString().slice(0,10);
   if (day !== _discDayKey) { _discDayKey = day; _discSpendUsd = 0; }
@@ -268,6 +286,8 @@ async function executeDecision(decision, openDealBotIds) {
     if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (' + _r17DailyCount + '/' + R17_DAILY_CAP + ')', dayKey: _r17DayKey }];
     const amt = parseFloat(decision.amount || 50);
     if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
+    // Signal Fund check — all spot_buy rules (R17/R18/R25/R30) draw from signal fund
+    if (!_signalCheck(amt)) return [{ skipped: 'signal fund daily cap reached', signalFund: _signalStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
     const amount = parseFloat(decision.amount || 50);
     // R18 reads direction from the decision text (sell or buy)
@@ -288,7 +308,10 @@ async function executeDecision(decision, openDealBotIds) {
       });
       const body = await r.json();
       if (r.ok && isR17) _r17Increment();
-      if (r.ok) _discAdd(amt);
+      if (r.ok) {
+        _discAdd(amt);
+        _signalAdd(amt);  // signal fund accounting
+      }
       return [{ smartTradeCreated: r.ok, status: r.status, amount, direction, response: body }];
     } catch(e) { return [{ error: e.message }]; }
   }
@@ -377,6 +400,7 @@ async function executeDecision(decision, openDealBotIds) {
         _r16ProcessedAlertIds.add(alert.ts);
         _r16Increment();
         _discAdd(50);
+        _signalAdd(50);  // signal fund accounting
       }
       return [{ smartTradeCreated: r.ok, status: r.status, alert, response: body }];
     } catch(e) { return [{ error: e.message }]; }
@@ -619,7 +643,7 @@ function getActions(limit) {
   return recentActions.slice(0, Math.max(1, Math.min(200, n)));
 }
 function getStatus() {
-  return { ...STATUS, lastTickAt, lastTickError, recentCount: recentActions.length, discretionary: _discStatus() };
+  return { ...STATUS, lastTickAt, lastTickError, recentCount: recentActions.length, discretionary: _discStatus(), signalFund: _signalStatus() };
 }
 async function manualExecute(decision) {
   if (AUTONOMY_KILL)           return { error: 'kill_switch_active' };
