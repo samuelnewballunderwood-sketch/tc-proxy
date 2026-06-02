@@ -626,20 +626,20 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, gridSpot, gridFut] = await Promise.all([
+      const [dealsSpot, dealsFut, botsR] = await Promise.all([
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33438577'),
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33439515'),
-        tcFetch('/public/api/ver1/grid_bots?limit=100&account_id=33438577'),
-        tcFetch('/public/api/ver1/grid_bots?limit=100&account_id=33439515'),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
       ]);
       const dcaDeals = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
       ];
-      const gridBots = [
-        ...(Array.isArray(gridSpot) ? gridSpot : []),
-        ...(Array.isArray(gridFut)  ? gridFut  : []),
-      ];
+      const allBots = (botsR && botsR.bots) || [];
+      const gridBots = allBots.filter(b => b.botType === 'grid').map(b => ({
+        finished_deals_count: b.completedDeals || 0,
+        total_profit: b.profit || 0,
+      }));
       const dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       // Grid bot deals: sum finished_deals_count + total_profit across all grids
       const grids = Array.isArray(gridBots) ? gridBots : [];
@@ -692,16 +692,17 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, gridSpotR, gridFutR] = await Promise.all([
+      const [dealsSpot, dealsFut, botsR] = await Promise.all([
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
-        tcFetchOne('/public/api/ver1/grid_bots?limit=100&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/grid_bots?limit=100&account_id=33439515'),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
       ]);
-      const gridBots = [
-        ...(Array.isArray(gridSpotR) ? gridSpotR : []),
-        ...(Array.isArray(gridFutR) ? gridFutR : []),
-      ];
+      const allBots = (botsR && botsR.bots) || [];
+      const gridBots = allBots.filter(b => b.botType === 'grid').map(b => ({
+        finished_deals_count: b.completedDeals || 0,
+        total_profit: b.profit || 0,
+        total_profit_today: 0,
+      }));
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const todayMs = todayUTC.getTime();
 
