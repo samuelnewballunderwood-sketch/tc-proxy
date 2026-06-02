@@ -758,28 +758,36 @@ async function handleRequest(req, res) {
       }
       const cachedDcaCount = _lastGoodToday?.breakdown?.dca?.count || 0;
       const cachedDcaProfit = _lastGoodToday?.breakdown?.dca?.profit || 0;
+      const cachedLiveCount = _lastGoodToday?.liveCount || 0;
+      const cachedLiveDca = _lastGoodToday?.liveDca || 0;
+      const cachedLiveGrid = _lastGoodToday?.liveGrid || 0;
       const mergedDcaCount = Math.max(dcaCount, cachedDcaCount);
       const mergedDcaProfit = Math.max(Math.round(dcaProfit * 100) / 100, cachedDcaProfit);
       const mergedGridLifetime = Math.max(gridLifetime, _lastGoodToday?.breakdown?.grid?.lifetimeTotal || 0);
+      // Live counts: high-water-mark — only ever accept the higher value within the day.
+      // Bots don't lose open positions in seconds, so a drop to 0 means /bots fetch failed.
+      const mergedLiveCount = Math.max(liveCount, cachedLiveCount);
+      const mergedLiveDca = Math.max(liveDca, cachedLiveDca);
+      const mergedLiveGrid = Math.max(liveGrid, cachedLiveGrid);
       const todayCount = mergedDcaCount;
       const todayProfit = mergedDcaProfit + Math.round(gridProfit * 100) / 100;
 
       const payload = {
         count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
-        liveCount,           // total currently-open deals across all bots
-        liveDca,             // DCA bots with an active deal
-        liveGrid,            // Grid bots with an active deal
+        liveCount: mergedLiveCount,
+        liveDca: mergedLiveDca,
+        liveGrid: mergedLiveGrid,
         breakdown: {
-          dca:  { count: mergedDcaCount, profit: mergedDcaProfit, live: liveDca },
-          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, live: liveGrid, note: 'per-day grid count requires daily snapshot — profit_today summed' },
+          dca:  { count: mergedDcaCount, profit: mergedDcaProfit, live: mergedLiveDca },
+          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, live: mergedLiveGrid, note: 'per-day grid count requires daily snapshot — profit_today summed' },
         },
         byBot: Object.keys(byBot).length ? byBot : (_lastGoodToday?.byBot || {}),
         asOf: new Date().toISOString(),
         windowStart: todayUTC.toISOString(),
       };
 
-      if (mergedDcaCount > 0 || gridLifetime > 0) {
+      if (mergedDcaCount > 0 || gridLifetime > 0 || mergedLiveCount > 0) {
         _lastGoodToday = payload;
       }
 
