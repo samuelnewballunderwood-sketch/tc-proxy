@@ -1183,6 +1183,13 @@ async function handleRequest(req, res) {
           avgDaily: Math.round(avgDaily * 100) / 100,
           reinvested: reinvested != null ? Math.round(reinvested * 100) / 100 : null,
           totalLocked: Math.round(totalLocked * 100) / 100,
+          // Tunable params (used by R31+ tuner rules)
+          takeProfitPct: parseFloat(b.take_profit || 0),
+          safetyOrderVolUsd: parseFloat(b.safety_order_volume || 0),
+          safetyOrderStepPct: parseFloat(b.safety_order_step_percentage || 0),
+          maxSafetyOrders: parseInt(b.max_safety_orders || 0),
+          martingaleVol: parseFloat(b.martingale_volume_coefficient || 0),
+          martingaleStep: parseFloat(b.martingale_step_coefficient || 0),
         };
       });
       // Sort by pnlUsd desc (champion first)
@@ -2097,6 +2104,76 @@ async function handleRequest(req, res) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(fallback));
     }
+    return;
+  }
+
+  // ── R31+ TUNER: update DCA bot params via 3Commas API ──────────
+  // POST /api/tune-bot {botId, takeProfitPct}
+  // Safety: TP capped 0.5-4.0%, requires existing config fetch + diff log
+  if (req.method === 'POST' && url === '/api/tune-bot') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const botId = parseInt(body.botId);
+      const newTp = parseFloat(body.takeProfitPct);
+      if (!botId || !newTp) { res.statusCode=400; res.end(JSON.stringify({error:'botId + takeProfitPct required'})); return; }
+      // Safety bounds
+      if (newTp < 0.5 || newTp > 4.0) { res.statusCode=400; res.end(JSON.stringify({error:'TP must be 0.5-4.0%', got:newTp})); return; }
+
+      async function tcFetch(path, opts={}) {
+        const fullPath = '/public/api' + path;
+        const sig = hmacSign(TC_SECRET, fullPath + (opts.body || ''));
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          method: opts.method || 'GET',
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: opts.body,
+        });
+        return { ok: r.ok, status: r.status, json: await r.json().catch(() => null) };
+      }
+
+      // 1. Fetch current config
+      const current = await tcFetch('/ver1/bots/' + botId + '/show');
+      if (!current.ok || !current.json) { res.statusCode=502; res.end(JSON.stringify({error:'failed to read bot config', status:current.status})); return; }
+      const c = current.json;
+      const oldTp = parseFloat(c.take_profit || 0);
+      const changeAbsPct = Math.abs(newTp - oldTp);
+      if (changeAbsPct > 0.5) { res.statusCode=400; res.end(JSON.stringify({error:'TP change too large per call (max 0.5%)', oldTp, newTp, change: changeAbsPct})); return; }
+
+      // 2. Build update payload — 3Commas requires the full config on update
+      const updatePayload = {
+        name: c.name,
+        pairs: c.pairs,
+        base_order_volume: c.base_order_volume,
+        take_profit: String(newTp),  // THE change
+        safety_order_volume: c.safety_order_volume,
+        martingale_volume_coefficient: c.martingale_volume_coefficient,
+        martingale_step_coefficient: c.martingale_step_coefficient,
+        max_safety_orders: c.max_safety_orders,
+        active_safety_orders_count: c.active_safety_orders_count,
+        safety_order_step_percentage: c.safety_order_step_percentage,
+        take_profit_type: c.take_profit_type || 'total',
+        strategy_list: c.strategy_list || [{ strategy: 'nonstop' }],
+        leverage_type: c.leverage_type || 'not_specified',
+        stop_loss_percentage: c.stop_loss_percentage || '0',
+        cooldown: c.cooldown || '0',
+        reinvesting_percentage: c.reinvesting_percentage || '100.0',
+      };
+
+      // 3. PATCH the bot
+      const bodyStr = JSON.stringify(updatePayload);
+      const patch = await tcFetch('/ver1/bots/' + botId + '/update', { method: 'PATCH', body: bodyStr });
+      if (!patch.ok) {
+        res.statusCode = 502;
+        res.end(JSON.stringify({ error: '3Commas update failed', status: patch.status, body: patch.json }));
+        return;
+      }
+      res.end(JSON.stringify({
+        success: true,
+        botId,
+        name: c.name,
+        change: { takeProfit: { from: oldTp, to: newTp, delta: +(newTp - oldTp).toFixed(2) } },
+        verifyAtCloseAt: new Date().toISOString(),
+      }));
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
 
