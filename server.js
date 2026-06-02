@@ -649,8 +649,13 @@ async function handleRequest(req, res) {
       const totalProfit = dcaProfit + gridTotalProfit;
       const totalDeals = dcaDeals.length + gridTotalDeals;
       // High-water-mark: prefer cached value when fresh fetch returned a lower count (likely partial)
-      const cachedDca = _lastGoodDealsSummary?.dcaDeals || 0;
-      const cachedDcaP = _lastGoodDealsSummary?.dcaProfit || 0;
+      // Legacy cache shape only has completedDeals/totalProfit — treat as DCA fallback
+      const cachedDca = _lastGoodDealsSummary?.dcaDeals
+        ?? _lastGoodDealsSummary?.completedDeals
+        ?? 0;
+      const cachedDcaP = _lastGoodDealsSummary?.dcaProfit
+        ?? _lastGoodDealsSummary?.totalProfit
+        ?? 0;
       const cachedGrid = _lastGoodDealsSummary?.gridDeals || 0;
       const cachedGridP = _lastGoodDealsSummary?.gridProfit || 0;
       const mergedDca = Math.max(dcaDeals.length, cachedDca);
