@@ -556,4 +556,13 @@ async function manualExecute(decision) {
 // ── Boot the loop (10s delay so server.js finishes init first) ──────
 setTimeout(tick, 10_000);
 
-module.exports = { getActions, getStatus, manualExecute };
+function resetCooldowns() {
+  const before = { fail: _failedAttempts.size, r31: _r31LastTuneAt.size };
+  _failedAttempts.clear();
+  _r31LastTuneAt.clear();
+  _r31DailyCount.clear();
+  logEvent({ event: 'cooldowns_reset', before });
+  return before;
+}
+
+module.exports = { getActions, getStatus, manualExecute, resetCooldowns };

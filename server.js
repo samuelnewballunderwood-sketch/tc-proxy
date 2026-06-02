@@ -2009,6 +2009,11 @@ async function handleRequest(req, res) {
     res.end(JSON.stringify(autonomy.getStatus()));
     return;
   }
+  if (req.method === 'POST' && url === '/api/reset-cooldowns') {
+    const before = autonomy.resetCooldowns();
+    res.end(JSON.stringify({ ok: true, cleared: before }));
+    return;
+  }
   if (req.method === 'POST' && url === '/api/execute') {
     try {
       const body = await readBody(req);
