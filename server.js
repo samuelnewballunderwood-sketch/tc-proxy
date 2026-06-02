@@ -626,14 +626,19 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, gridBots] = await Promise.all([
+      const [dealsSpot, dealsFut, gridSpot, gridFut] = await Promise.all([
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33438577'),
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33439515'),
-        tcFetch('/public/api/ver1/grid_bots?limit=200'),
+        tcFetch('/public/api/ver1/grid_bots?limit=100&account_id=33438577'),
+        tcFetch('/public/api/ver1/grid_bots?limit=100&account_id=33439515'),
       ]);
       const dcaDeals = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+      ];
+      const gridBots = [
+        ...(Array.isArray(gridSpot) ? gridSpot : []),
+        ...(Array.isArray(gridFut)  ? gridFut  : []),
       ];
       const dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       // Grid bot deals: sum finished_deals_count + total_profit across all grids
@@ -687,11 +692,16 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, gridBots] = await Promise.all([
+      const [dealsSpot, dealsFut, gridSpotR, gridFutR] = await Promise.all([
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
-        tcFetchOne('/public/api/ver1/grid_bots?limit=200'),
+        tcFetchOne('/public/api/ver1/grid_bots?limit=100&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/grid_bots?limit=100&account_id=33439515'),
       ]);
+      const gridBots = [
+        ...(Array.isArray(gridSpotR) ? gridSpotR : []),
+        ...(Array.isArray(gridFutR) ? gridFutR : []),
+      ];
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const todayMs = todayUTC.getTime();
 
