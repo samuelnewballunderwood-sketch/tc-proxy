@@ -2238,17 +2238,25 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── R31+ TUNER: update DCA bot params via 3Commas API ──────────
-  // POST /api/tune-bot {botId, takeProfitPct}
-  // Safety: TP capped 0.5-4.0%, requires existing config fetch + diff log
+  // ── R31+/R32+ TUNER: update DCA bot params via 3Commas API ──────────
+  // POST /api/tune-bot {botId, takeProfitPct?, safetyOrderStepPct?}
+  // Safety: TP capped 0.5-4.0%, SO step capped 1.0-6.0%, max delta per call enforced
   if (req.method === 'POST' && url === '/api/tune-bot') {
     try {
       const body = JSON.parse(await readBody(req));
       const botId = parseInt(body.botId);
-      const newTp = parseFloat(body.takeProfitPct);
-      if (!botId || !newTp) { res.statusCode=400; res.end(JSON.stringify({error:'botId + takeProfitPct required'})); return; }
+      const newTp = body.takeProfitPct != null ? parseFloat(body.takeProfitPct) : null;
+      const newSoStep = body.safetyOrderStepPct != null ? parseFloat(body.safetyOrderStepPct) : null;
+      if (!botId || (newTp == null && newSoStep == null)) {
+        res.statusCode=400; res.end(JSON.stringify({error:'botId + (takeProfitPct OR safetyOrderStepPct) required'})); return;
+      }
       // Safety bounds
-      if (newTp < 0.5 || newTp > 4.0) { res.statusCode=400; res.end(JSON.stringify({error:'TP must be 0.5-4.0%', got:newTp})); return; }
+      if (newTp != null && (newTp < 0.5 || newTp > 4.0)) {
+        res.statusCode=400; res.end(JSON.stringify({error:'TP must be 0.5-4.0%', got:newTp})); return;
+      }
+      if (newSoStep != null && (newSoStep < 1.0 || newSoStep > 6.0)) {
+        res.statusCode=400; res.end(JSON.stringify({error:'SO step must be 1.0-6.0%', got:newSoStep})); return;
+      }
 
       async function tcFetch(path, opts={}) {
         const fullPath = '/public/api' + path;
@@ -2266,21 +2274,26 @@ async function handleRequest(req, res) {
       if (!current.ok || !current.json) { res.statusCode=502; res.end(JSON.stringify({error:'failed to read bot config', status:current.status})); return; }
       const c = current.json;
       const oldTp = parseFloat(c.take_profit || 0);
-      const changeAbsPct = Math.abs(newTp - oldTp);
-      if (changeAbsPct > 0.5) { res.statusCode=400; res.end(JSON.stringify({error:'TP change too large per call (max 0.5%)', oldTp, newTp, change: changeAbsPct})); return; }
+      const oldSoStep = parseFloat(c.safety_order_step_percentage || 0);
+      const tpDelta = newTp != null ? Math.abs(newTp - oldTp) : 0;
+      const soDelta = newSoStep != null ? Math.abs(newSoStep - oldSoStep) : 0;
+      if (tpDelta > 0.5) { res.statusCode=400; res.end(JSON.stringify({error:'TP change too large per call (max 0.5%)', oldTp, newTp, change: tpDelta})); return; }
+      if (soDelta > 0.5) { res.statusCode=400; res.end(JSON.stringify({error:'SO step change too large per call (max 0.5%)', oldSoStep, newSoStep, change: soDelta})); return; }
 
       // 2. Build update payload — 3Commas requires the full config on update
+      const finalTp = newTp != null ? newTp : oldTp;
+      const finalSoStep = newSoStep != null ? newSoStep : oldSoStep;
       const updatePayload = {
         name: c.name,
         pairs: c.pairs,
         base_order_volume: c.base_order_volume,
-        take_profit: String(newTp),  // THE change
+        take_profit: String(finalTp),
         safety_order_volume: c.safety_order_volume,
         martingale_volume_coefficient: c.martingale_volume_coefficient,
         martingale_step_coefficient: c.martingale_step_coefficient,
         max_safety_orders: c.max_safety_orders,
         active_safety_orders_count: c.active_safety_orders_count,
-        safety_order_step_percentage: c.safety_order_step_percentage,
+        safety_order_step_percentage: String(finalSoStep),
         take_profit_type: c.take_profit_type || 'total',
         strategy_list: c.strategy_list || [{ strategy: 'nonstop' }],
         leverage_type: c.leverage_type || 'not_specified',
@@ -2297,11 +2310,14 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: '3Commas update failed', status: patch.status, body: patch.json }));
         return;
       }
+      const change = {};
+      if (newTp != null) change.takeProfit = { from: oldTp, to: newTp, delta: +(newTp - oldTp).toFixed(2) };
+      if (newSoStep != null) change.safetyOrderStep = { from: oldSoStep, to: newSoStep, delta: +(newSoStep - oldSoStep).toFixed(2) };
       res.end(JSON.stringify({
         success: true,
         botId,
         name: c.name,
-        change: { takeProfit: { from: oldTp, to: newTp, delta: +(newTp - oldTp).toFixed(2) } },
+        change,
         verifyAtCloseAt: new Date().toISOString(),
       }));
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
