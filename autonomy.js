@@ -425,18 +425,26 @@ async function tick() {
     }
     const { decisions = [] } = await dRes.json();
 
-    // PHASE 2: write today's locked profit snapshot if not already done
+    // PHASE 2: write today's locked profit snapshot (canonical from /deals/summary, not /api/decisions)
+    // Guards: (a) only write if locked > 0, (b) only overwrite if new value >= existing (high-water-mark)
     try {
-      const snapR = await fetch(WORKER_BASE + '/api/daily-snapshot');
+      const [snapR, dealsR] = await Promise.all([
+        fetch(WORKER_BASE + '/api/daily-snapshot'),
+        fetch('https://tc-proxy-eu.onrender.com/deals/summary'),
+      ]);
       const snapJ = snapR.ok ? await snapR.json() : null;
-      if (!snapJ?.today?.locked) {
-        const recon = decisions && (await (await fetch(WORKER_BASE + '/api/decisions')).json()).reconciliation;
-        const currentLocked = recon?.totalRealised ?? 0;
+      const dealsJ = dealsR.ok ? await dealsR.json() : null;
+      const canonicalLocked = parseFloat(dealsJ?.totalProfit || 0);
+      const existingLocked = parseFloat(snapJ?.today?.locked || 0);
+      // Only write if (a) we have a real value AND (b) it's >= existing snapshot
+      if (canonicalLocked > 0 && canonicalLocked >= existingLocked - 1) {
+        // Only log if value actually changed materially
+        const changed = Math.abs(canonicalLocked - existingLocked) > 0.5;
         await fetch(WORKER_BASE + '/api/daily-snapshot', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ locked: currentLocked }),
+          body: JSON.stringify({ locked: canonicalLocked }),
         });
-        logEvent({ event: 'daily_snapshot_written', locked: currentLocked });
+        if (changed) logEvent({ event: 'daily_snapshot_written', locked: canonicalLocked, prev: existingLocked });
       }
     } catch (_) {}
 
