@@ -738,6 +738,11 @@ async function handleRequest(req, res) {
       const gridLifetime = grids.reduce((s, g) => s + parseInt(g.finished_deals_count || 0), 0);
       const gridProfit = grids.reduce((s, g) => s + parseFloat(g.total_profit_today || g.profit_today || 0), 0);
 
+      // LIVE (currently open) deal count — sum activeDeals across all bots
+      const liveCount = allBots.reduce((s, b) => s + parseInt(b.activeDeals || 0), 0);
+      const liveDca   = allBots.filter(b => b.botType === 'dca'  && b.activeDeals > 0).length;
+      const liveGrid  = allBots.filter(b => b.botType === 'grid' && b.activeDeals > 0).length;
+
       // By-bot breakdown (DCA only — grids don't expose per-day deal counts)
       const byBot = {};
       for (const d of todayDca) {
@@ -762,9 +767,12 @@ async function handleRequest(req, res) {
       const payload = {
         count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
+        liveCount,           // total currently-open deals across all bots
+        liveDca,             // DCA bots with an active deal
+        liveGrid,            // Grid bots with an active deal
         breakdown: {
-          dca:  { count: mergedDcaCount, profit: mergedDcaProfit },
-          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, note: 'per-day grid count requires daily snapshot — profit_today summed' },
+          dca:  { count: mergedDcaCount, profit: mergedDcaProfit, live: liveDca },
+          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, live: liveGrid, note: 'per-day grid count requires daily snapshot — profit_today summed' },
         },
         byBot: Object.keys(byBot).length ? byBot : (_lastGoodToday?.byBot || {}),
         asOf: new Date().toISOString(),
