@@ -2190,11 +2190,19 @@ async function handleRequest(req, res) {
         }
       }
 
-      // Group by bot/rule
+      // Capture original decision.amount when present (this is what the rule WANTED to spend)
+      for (const f of failures) {
+        const a = recent.find(x => x.ts === f.ts);
+        f.requestedAmount = parseFloat(a?.decision?.amount || 0);
+      }
+
+      // Group by bot/rule with suggested top-up = sum of requested amounts (UNIQUE per (objective, asset))
       const byBot = {};
       const byRule = {};
       const byAsset = {};
       const byReason = {};
+      const suggestedTopUpByAsset = {};
+      const seenSig = new Set();  // dedupe: same (objective, asset) only counted once
       for (const f of failures) {
         const botKey = f.botId ? String(f.botId) : 'no-bot';
         byBot[botKey] = (byBot[botKey] || 0) + 1;
@@ -2202,7 +2210,15 @@ async function handleRequest(req, res) {
         byAsset[f.asset] = (byAsset[f.asset] || 0) + 1;
         const shortReason = f.reason.slice(0, 50);
         byReason[shortReason] = (byReason[shortReason] || 0) + 1;
+        const sig = f.objective + ':' + f.asset;
+        if (!seenSig.has(sig) && f.requestedAmount > 0) {
+          seenSig.add(sig);
+          // Asset key: try to normalize (USDT, BTC, etc.) — default 'USDT' for unknown
+          const assetKey = (f.asset === 'unknown' || /^bot:/.test(f.asset)) ? 'USDT' : f.asset;
+          suggestedTopUpByAsset[assetKey] = (suggestedTopUpByAsset[assetKey] || 0) + f.requestedAmount;
+        }
       }
+      const totalSuggestedUsd = Object.values(suggestedTopUpByAsset).reduce((s, v) => s + v, 0);
 
       res.end(JSON.stringify({
         total: failures.length,
@@ -2211,12 +2227,66 @@ async function handleRequest(req, res) {
         byRule,
         byAsset,
         byReason,
+        suggestedTopUpByAsset,
+        totalSuggestedUsd: Math.round(totalSuggestedUsd * 100) / 100,
         recent: failures.slice(0, 10),
         asOf: new Date().toISOString(),
       }));
     } catch(e) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message, total: 0 }));
+    }
+    return;
+  }
+
+  // ── GET /api/idle-capital — spare funds NOT deployed in any bot
+  if (req.method === 'GET' && url === '/api/idle-capital') {
+    try {
+      const [auditR, capR, futR, earnR] = await Promise.all([
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/capital-audit').then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/total-capital').then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/futures-wallet').then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/binance-earn-positions').then(r => r.ok ? r.json() : null).catch(() => null),
+      ]);
+      const audit = auditR?.audit || {};
+      const totalCap = capR?.total || 0;
+      const futuresAvailable = parseFloat(futR?.availableBalance || 0);
+      // Build per-asset breakdown — idle = (free spot - bot-locked) by asset
+      const perAsset = {};
+      let totalBotLocked = 0;
+      let totalEarn = 0;
+      for (const [asset, d] of Object.entries(audit)) {
+        const free = parseFloat(d.spotFree || 0);
+        const locked = parseFloat(d.spotLocked || 0);
+        const inBots = parseFloat(d.activeBotCapitalUsd || 0);
+        const earn = parseFloat(d.flexibleEarn || 0) + parseFloat(d.lockedEarn || 0);
+        totalBotLocked += inBots;
+        totalEarn += earn;
+        if (free > 0 || locked > 0 || inBots > 0 || earn > 0) {
+          perAsset[asset] = {
+            spotFree: free,
+            spotLocked: locked,
+            inBots,
+            earn,
+            idleEstimate: Math.max(0, free + locked - inBots),
+          };
+        }
+      }
+      const idleSpotUsd = Math.max(0, totalCap - totalBotLocked - totalEarn - (futR?.marginBalance || 0));
+      res.end(JSON.stringify({
+        totalCapital: totalCap,
+        totalBotLocked: Math.round(totalBotLocked * 100) / 100,
+        totalEarn: Math.round(totalEarn * 100) / 100,
+        futuresMarginBalance: Math.round((futR?.marginBalance || 0) * 100) / 100,
+        futuresAvailable: Math.round(futuresAvailable * 100) / 100,
+        idleSpotUsdEstimate: Math.round(idleSpotUsd * 100) / 100,
+        idleTotalUsd: Math.round((idleSpotUsd + futuresAvailable) * 100) / 100,
+        perAsset,
+        asOf: new Date().toISOString(),
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
     }
     return;
   }
