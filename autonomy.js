@@ -286,8 +286,6 @@ async function executeDecision(decision, openDealBotIds) {
     if (isR17 && !_r17CheckCap()) return [{ skipped: 'R17 daily cap reached (' + _r17DailyCount + '/' + R17_DAILY_CAP + ')', dayKey: _r17DayKey }];
     const amt = parseFloat(decision.amount || 50);
     if (!_discCheck(amt)) return [{ skipped: 'discretionary daily cap reached', wallet: _discStatus() }];
-    // Signal Fund check — all spot_buy rules (R17/R18/R25/R30) draw from signal fund
-    if (!_signalCheck(amt)) return [{ skipped: 'signal fund daily cap reached', signalFund: _signalStatus() }];
     const pair = decision.suggestedPair || 'USDT_BTC';
     const amount = parseFloat(decision.amount || 50);
     // R18 reads direction from the decision text (sell or buy)
@@ -308,10 +306,7 @@ async function executeDecision(decision, openDealBotIds) {
       });
       const body = await r.json();
       if (r.ok && isR17) _r17Increment();
-      if (r.ok) {
-        _discAdd(amt);
-        _signalAdd(amt);  // signal fund accounting
-      }
+      if (r.ok) _discAdd(amt);
       return [{ smartTradeCreated: r.ok, status: r.status, amount, direction, response: body }];
     } catch(e) { return [{ error: e.message }]; }
   }
@@ -400,7 +395,6 @@ async function executeDecision(decision, openDealBotIds) {
         _r16ProcessedAlertIds.add(alert.ts);
         _r16Increment();
         _discAdd(50);
-        _signalAdd(50);  // signal fund accounting
       }
       return [{ smartTradeCreated: r.ok, status: r.status, alert, response: body }];
     } catch(e) { return [{ error: e.message }]; }

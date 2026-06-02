@@ -2142,9 +2142,11 @@ async function handleRequest(req, res) {
       const data = await r.ok ? await r.json() : null;
       const items = (data && (data.items || (Array.isArray(data) ? data : []))) || [];
       // Filter to signal-tagged trades by note prefix
+      // ONLY count trades explicitly tagged SIGNAL/ — existing rules (R16/R17/R18/R25/R30)
+      // remain part of the main discretionary pool, NOT the Signal Fund.
       const signalTrades = items.filter(t => {
         const note = t.note || t.note_raw || '';
-        return /^(R16|R17|R18|R25|R30)/.test(note) || /SIGNAL\//.test(note);
+        return /^SIGNAL\//.test(note);
       });
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const todayMs = todayUTC.getTime();
