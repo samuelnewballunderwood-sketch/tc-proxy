@@ -147,6 +147,8 @@ If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no
 // Last-good cache for total-capital + deals summary (in-memory)
 let _lastGoodCapital = null;
 let _lastGoodDealsSummary = null;
+let _lastGoodToday = null;  // today-deals cache; resets when UTC day changes
+let _lastGoodTodayDay = null;
 let _kvHydrated = false;
 
 const KV_PORTFOLIO_URL = 'https://alphacontrol.ai/api/cache/portfolio';
@@ -743,20 +745,37 @@ async function handleRequest(req, res) {
         byBot[name] = (byBot[name] || 0) + 1;
       }
 
-      const todayCount = dcaCount;  // DCA count is the only confirmed daily count
-      const todayProfit = dcaProfit + gridProfit;
+      // High-water-mark cache (resets when UTC day changes)
+      const todayDayKey = todayUTC.toISOString().slice(0, 10);
+      if (_lastGoodTodayDay !== todayDayKey) {
+        _lastGoodToday = null;
+        _lastGoodTodayDay = todayDayKey;
+      }
+      const cachedDcaCount = _lastGoodToday?.breakdown?.dca?.count || 0;
+      const cachedDcaProfit = _lastGoodToday?.breakdown?.dca?.profit || 0;
+      const mergedDcaCount = Math.max(dcaCount, cachedDcaCount);
+      const mergedDcaProfit = Math.max(Math.round(dcaProfit * 100) / 100, cachedDcaProfit);
+      const mergedGridLifetime = Math.max(gridLifetime, _lastGoodToday?.breakdown?.grid?.lifetimeTotal || 0);
+      const todayCount = mergedDcaCount;
+      const todayProfit = mergedDcaProfit + Math.round(gridProfit * 100) / 100;
 
-      res.end(JSON.stringify({
+      const payload = {
         count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
         breakdown: {
-          dca:  { count: dcaCount, profit: Math.round(dcaProfit * 100) / 100 },
-          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: gridLifetime, note: 'per-day grid count requires daily snapshot — profit_today summed' },
+          dca:  { count: mergedDcaCount, profit: mergedDcaProfit },
+          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, note: 'per-day grid count requires daily snapshot — profit_today summed' },
         },
-        byBot,
+        byBot: Object.keys(byBot).length ? byBot : (_lastGoodToday?.byBot || {}),
         asOf: new Date().toISOString(),
         windowStart: todayUTC.toISOString(),
-      }));
+      };
+
+      if (mergedDcaCount > 0 || gridLifetime > 0) {
+        _lastGoodToday = payload;
+      }
+
+      res.end(JSON.stringify(payload));
     } catch(e) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message, count: 0 }));
