@@ -783,7 +783,24 @@ async function handleRequest(req, res) {
         finished_deals_count: b.completedDeals || 0,
         total_profit: b.profit || 0,
       }));
-      const dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      // Use per-deal final_profit summed — falls back to bot-aggregated profit when
+      // /api/dca-detail provides finished_deals_profit_usd that matches 3Commas UI.
+      // The dca-detail aggregation matches 3Commas display while final_profit sum over-counts
+      // due to internal reinvestment handling.
+      let dcaProfit = 0;
+      try {
+        const ddR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/dca-detail');
+        if (ddR.ok) {
+          const dd = await ddR.json();
+          if (dd?.summary?.totalCash != null && dd.summary.totalCash > 0) {
+            dcaProfit = parseFloat(dd.summary.totalCash);
+          }
+        }
+      } catch(_) {}
+      if (dcaProfit === 0) {
+        // Fallback to raw deal sum if dca-detail unavailable
+        dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      }
       // Reinvested = sum of safety-order volumes funded by deal profit. 3Commas tracks this
       // on each deal as `reserved_*` and on bots as `finished_deals_reinvested_*` but we derive
       // from the bot stats endpoint when available, else from DCA `from_currency_is_dollars`.
