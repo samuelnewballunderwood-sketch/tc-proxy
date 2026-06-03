@@ -2309,6 +2309,48 @@ async function handleRequest(req, res) {
   // ── GET /api/insufficient-funds — group fund-related failures by bot/rule
   if (req.method === 'GET' && url === '/api/insufficient-funds') {
     try {
+      // ── (1) 3Commas direct: fetch active deals + scan for bot-side errors ──
+      // (DCA bot safety-order rejections + Binance MIN_NOTIONAL / insufficient balance
+      // surface as deal-level error_message — not our autonomy log.)
+      const tc3 = async (path, qs) => {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept':'application/json' }
+        });
+        if (r.status === 204) return [];
+        const raw = await r.text();
+        try { return JSON.parse(raw); } catch { return []; }
+      };
+      const [activeSpot, activeFut] = await Promise.all([
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33438577').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33439515').catch(()=>[]),
+      ]);
+      const activeDeals = [
+        ...(Array.isArray(activeSpot) ? activeSpot : []),
+        ...(Array.isArray(activeFut)  ? activeFut  : []),
+      ];
+      // A deal is "in trouble" if 3Commas marked error_state or has error_message
+      const FUND_REGEX = /insufficient|not.?enough|balance|min[._ ]?notional|too[._ ]?small|-2010|-2019|reduce.{0,8}only/i;
+      const botErrors = [];
+      for (const d of activeDeals) {
+        const msg = String(d.error_message || d.last_error_message || d.bot_events?.[0]?.message || '');
+        const hasErr = !!d.error_state || (d.status && /error|fail/i.test(d.status)) || FUND_REGEX.test(msg);
+        if (!hasErr) continue;
+        const pair  = String(d.pair || '').toUpperCase();
+        const base  = pair.split('_')[1] || pair.replace(/USDT$/,'') || 'USDT';
+        botErrors.push({
+          ts: d.updated_at || d.created_at || new Date().toISOString(),
+          objective: 'bot_deal_error',
+          text: (d.bot_name || pair) + ' deal ' + (d.id||''),
+          asset: base,
+          botId: d.bot_id,
+          botName: d.bot_name,
+          reason: msg.slice(0,160) || ('3Commas status=' + d.status),
+          requestedAmount: parseFloat(d.base_order_volume || d.safety_order_volume || 0),
+          source: '3Commas-deal-error',
+        });
+      }
       // Pull persistent KV-backed action log from worker (survives Render restarts)
       const histR = await fetch('https://alphacontrol.ai/api/hannah-actions').catch(() => null);
       const hist = histR && histR.ok ? await histR.json() : { actions: [] };
@@ -2345,7 +2387,7 @@ async function handleRequest(req, res) {
         /already processed/i,
       ];
 
-      const failures = [];
+      const failures = [...botErrors];  // start with 3Commas-side deal errors
       for (const a of recent) {
         const results = a.results || [];
         for (const r of results) {
@@ -2395,10 +2437,20 @@ async function handleRequest(req, res) {
       }
       const totalSuggestedUsd = Object.values(suggestedTopUpByAsset).reduce((s, v) => s + v, 0);
 
+      // Add bot names for clarity
+      const byBotName = {};
+      for (const f of failures) {
+        if (f.botName) byBotName[f.botName] = (byBotName[f.botName] || 0) + 1;
+      }
       res.end(JSON.stringify({
         total: failures.length,
         windowHours: 24,
+        sourceBreakdown: {
+          autonomy_log: failures.filter(f => !f.source).length,
+          three_commas_deals: failures.filter(f => f.source === '3Commas-deal-error').length,
+        },
         byBot,
+        byBotName,
         byRule,
         byAsset,
         byReason,
