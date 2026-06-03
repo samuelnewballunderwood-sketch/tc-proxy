@@ -152,6 +152,31 @@ let _lastGoodTodayDay = null;
 let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
 let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
+
+// Binance fetch cache — Render's shared IP gets rate-limited fast.
+// Per-key TTL. On '418 Too Many Requests' (IP ban), switch to a 30-minute TTL.
+const _binCache = {};            // key -> { value, expires }
+let _binBannedUntil = 0;         // ms epoch when Binance ban lifts
+async function _binCached(key, ttlMs, fetcher) {
+  const now = Date.now();
+  const c = _binCache[key];
+  if (c && c.expires > now) return c.value;
+  // While banned, return stale cache if we have one rather than hitting Binance
+  if (_binBannedUntil > now && c) return c.value;
+  try {
+    const v = await fetcher();
+    // Detect Binance ban marker in error responses
+    if (v && typeof v === 'object' && /banned until (\d+)/.test(v.msg || v.error || '')) {
+      const m = /banned until (\d+)/.exec(v.msg || v.error || '');
+      if (m) _binBannedUntil = parseInt(m[1]);
+    }
+    _binCache[key] = { value: v, expires: now + ttlMs };
+    return v;
+  } catch(e) {
+    if (c) return c.value;
+    throw e;
+  }
+}
 let _kvHydrated = false;
 
 const KV_PORTFOLIO_URL = 'https://alphacontrol.ai/api/cache/portfolio';
@@ -240,22 +265,26 @@ async function handleRequest(req, res) {
   // ── GET /spot-wallet ────────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/spot-wallet') {
     try {
-      const ts  = Date.now();
-      const q   = `timestamp=${ts}&recvWindow=10000`;
-      const sig = hmacSign(BN_SECRET, q);
-      const r   = await fetch(`https://api.binance.com/api/v3/account?${q}&signature=${sig}`, {
-        headers: { 'X-MBX-APIKEY': BN_KEY }
+      const out = await _binCached('spot-wallet', 45_000, async () => {
+        const ts  = Date.now();
+        const q   = `timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r   = await fetch(`https://api.binance.com/api/v3/account?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const data = await r.json();
+        if (data.msg) return { error: data.msg, msg: data.msg };
+        const usdt    = data.balances.find(b => b.asset === 'USDT');
+        const usdtBal = usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : 0;
+        const nonZero = data.balances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
+        return {
+          usdtBalance: usdtBal,
+          assetCount:  nonZero.length,
+          balances:    nonZero.map(b => ({ asset: b.asset, free: parseFloat(b.free), locked: parseFloat(b.locked) }))
+        };
       });
-      const data = await r.json();
-      if (data.msg) throw new Error(data.msg);
-      const usdt    = data.balances.find(b => b.asset === 'USDT');
-      const usdtBal = usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : 0;
-      const nonZero = data.balances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
-      res.end(JSON.stringify({
-        usdtBalance: usdtBal,
-        assetCount:  nonZero.length,
-        balances:    nonZero.map(b => ({ asset: b.asset, free: parseFloat(b.free), locked: parseFloat(b.locked) }))
-      }));
+      if (out && out.error) { res.statusCode = 503; res.end(JSON.stringify(out)); return; }
+      res.end(JSON.stringify(out || {}));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
@@ -263,20 +292,24 @@ async function handleRequest(req, res) {
   // ── GET /futures-wallet ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/futures-wallet') {
     try {
-      const ts  = Date.now();
-      const q   = `timestamp=${ts}&recvWindow=10000`;
-      const sig = hmacSign(BN_SECRET, q);
-      const r   = await fetch(`https://fapi.binance.com/fapi/v2/account?${q}&signature=${sig}`, {
-        headers: { 'X-MBX-APIKEY': BN_KEY }
+      const out = await _binCached('futures-wallet', 60_000, async () => {
+        const ts  = Date.now();
+        const q   = `timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r   = await fetch(`https://fapi.binance.com/fapi/v2/account?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const data = await r.json();
+        if (data.msg) return { error: data.msg, msg: data.msg };
+        return {
+          marginBalance:    parseFloat(data.totalMarginBalance    || 0),
+          walletBalance:    parseFloat(data.totalWalletBalance    || 0),
+          unrealizedPnl:    parseFloat(data.totalUnrealizedProfit || 0),
+          availableBalance: parseFloat(data.availableBalance      || 0)
+        };
       });
-      const data = await r.json();
-      if (data.msg) throw new Error(data.msg);
-      res.end(JSON.stringify({
-        marginBalance:    parseFloat(data.totalMarginBalance    || 0),
-        walletBalance:    parseFloat(data.totalWalletBalance    || 0),
-        unrealizedPnl:    parseFloat(data.totalUnrealizedProfit || 0),
-        availableBalance: parseFloat(data.availableBalance      || 0)
-      }));
+      if (out && out.error) { res.statusCode = 503; res.end(JSON.stringify(out)); return; }
+      res.end(JSON.stringify(out || {}));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
@@ -285,26 +318,21 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/prices') {
     try {
       const SYMS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
-      // Binance rejects un-encoded brackets — encode the JSON array properly.
-      const qs = 'symbols=' + encodeURIComponent(JSON.stringify(SYMS));
-      const r    = await fetch('https://api.binance.com/api/v3/ticker/price?' + qs);
-      const data = await r.json();
-      const out  = {};
-      if (Array.isArray(data)) {
-        data.forEach(p => out[p.symbol] = parseFloat(p.price));
-      } else {
-        // Binance returned an error object — fall back to per-symbol calls
-        console.warn('[prices] multi-symbol failed:', data?.msg || data);
-        const perSymbol = await Promise.all(SYMS.map(s =>
-          fetch('https://api.binance.com/api/v3/ticker/price?symbol=' + s)
-            .then(rr => rr.ok ? rr.json() : null)
-            .catch(() => null)
-        ));
-        perSymbol.forEach((p, i) => {
-          if (p && p.price) out[SYMS[i]] = parseFloat(p.price);
-        });
-      }
-      res.end(JSON.stringify(out));
+      // Cache prices for 30s — autonomy ticks every minute, dashboard every 60-90s
+      const out = await _binCached('prices', 30_000, async () => {
+        const qs = 'symbols=' + encodeURIComponent(JSON.stringify(SYMS));
+        const r = await fetch('https://api.binance.com/api/v3/ticker/price?' + qs);
+        const data = await r.json();
+        const result = {};
+        if (Array.isArray(data)) {
+          data.forEach(p => result[p.symbol] = parseFloat(p.price));
+        } else if (data && data.msg) {
+          // Surface the ban error so _binCached can detect it
+          return { error: data.msg, msg: data.msg };
+        }
+        return result;
+      });
+      res.end(JSON.stringify(out || {}));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
@@ -2496,6 +2524,16 @@ async function handleRequest(req, res) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message }));
     }
+    return;
+  }
+  if (req.method === 'GET' && url === '/api/binance-ban-status') {
+    const now = Date.now();
+    res.end(JSON.stringify({
+      banned: _binBannedUntil > now,
+      bannedUntil: _binBannedUntil > 0 ? new Date(_binBannedUntil).toISOString() : null,
+      msRemaining: Math.max(0, _binBannedUntil - now),
+      cacheKeys: Object.keys(_binCache),
+    }));
     return;
   }
   if (req.method === 'GET' && url === '/api/autonomy-status') {

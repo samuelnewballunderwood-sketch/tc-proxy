@@ -524,7 +524,9 @@ async function nextDelayMs() {
     const r = await _fetchT(WORKER_BASE + '/api/portfolio', {}, 5000);
     const j = await r.json();
     const regime = (j?.market?.regime || '').toLowerCase();
-    if (regime.includes('bear')) return  60 * 1000;        // 1 min — high vigilance
+    // Cadence tuned to stay UNDER Binance rate limits — Render's shared IP
+    // gets banned at ~6000 weight/min and we were getting banned daily.
+    if (regime.includes('bear')) return  3 * 60 * 1000;    // 3 min (was 1 min) — high vigilance
     if (regime.includes('bull')) return 15 * 60 * 1000;    // 15 min — low frequency
     return 5 * 60 * 1000;                                  // 5 min default
   } catch (_) {
