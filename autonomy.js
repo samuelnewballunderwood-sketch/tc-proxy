@@ -182,7 +182,7 @@ function _discStatus() {
   if (day !== _discDayKey) { return { day, spentUsd: 0, capUsd: DISCRETIONARY_DAILY_CAP_USD }; }
   return { day: _discDayKey, spentUsd: _discSpendUsd, capUsd: DISCRETIONARY_DAILY_CAP_USD };
 }
-const R17_DAILY_CAP = parseInt(process.env.R17_DAILY_CAP || '5', 10);
+const R17_DAILY_CAP = parseInt(process.env.R17_DAILY_CAP || '10', 10);
 
 // R31 tuner: per-bot cooldown + daily cap
 const R31_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6h between tunes per bot
