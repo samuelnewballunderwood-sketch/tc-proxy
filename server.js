@@ -2769,6 +2769,39 @@ async function handleRequest(req, res) {
     }
     return;
   }
+  if (req.method === 'GET' && url === '/api/3commas-bot-debug') {
+    try {
+      const tc3 = async (path, qs) => {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept':'application/json' }
+        });
+        return r.ok ? r.json() : { err: r.status };
+      };
+      const botId = new URL(req.url, 'http://x').searchParams.get('id') || '16806276';
+      const [bot, stats] = await Promise.all([
+        tc3('/ver1/bots/' + botId + '/show', ''),
+        tc3('/ver1/bots/stats', '').catch(()=>null),
+      ]);
+      // Surface ALL fields that contain 'profit', 'reinvest', 'compound', 'lock'
+      const filterFields = (obj, terms) => {
+        const out = {};
+        for (const [k, v] of Object.entries(obj || {})) {
+          if (terms.some(t => k.toLowerCase().includes(t))) out[k] = v;
+        }
+        return out;
+      };
+      res.end(JSON.stringify({
+        botId,
+        bot_all_keys: Object.keys(bot || {}),
+        bot_profit_related: filterFields(bot, ['profit','reinvest','compound','lock','final','reserved']),
+        stats_top_keys: Object.keys(stats || {}),
+        stats_data: stats,
+      }, null, 2));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/binance-ban-status') {
     const now = Date.now();
     res.end(JSON.stringify({
