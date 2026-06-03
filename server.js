@@ -1762,15 +1762,19 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/api/binance-earn-positions') {
     try {
       if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
-      const ts = Date.now();
-      const q = `timestamp=${ts}&recvWindow=10000`;
-      const sig = hmacSign(BN_SECRET, q);
-      const r = await fetch(`https://api.binance.com/sapi/v1/simple-earn/flexible/position?${q}&signature=${sig}`, {
-        headers: { 'X-MBX-APIKEY': BN_KEY }
+      const data = await _binCached('earn-positions', 300_000, async () => {
+        const ts = Date.now();
+        const q = `timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r = await fetch(`https://api.binance.com/sapi/v1/simple-earn/flexible/position?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const d = await r.json();
+        if (!r.ok) return { error: d.msg || JSON.stringify(d), msg: d.msg };
+        return d;
       });
-      const data = await r.json();
-      res.statusCode = r.ok ? 200 : r.status;
-      res.end(JSON.stringify(data));
+      if (data && data.error) { res.statusCode = 503; res.end(JSON.stringify(data)); return; }
+      res.end(JSON.stringify(data || {}));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
