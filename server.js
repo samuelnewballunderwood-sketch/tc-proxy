@@ -909,6 +909,53 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── GET /api/yesterday-deals — closed deals between UTC midnight 2 days ago + UTC midnight today
+  if (req.method === 'GET' && url === '/api/yesterday-deals') {
+    try {
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      const todayMs = todayUTC.getTime();
+      const yesterdayMs = todayMs - 24*60*60*1000;
+      function tcFetchY(path) {
+        const sig = hmacSign(TC_SECRET, path);
+        return fetch('https://api.3commas.io' + path, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig }
+        }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
+      }
+      const [dealsSpot, dealsFut] = await Promise.all([
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
+      ]);
+      const allDca = [
+        ...(Array.isArray(dealsSpot) ? dealsSpot : []),
+        ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+      ];
+      const yesterdayDca = allDca.filter(d => {
+        if (!d.closed_at) return false;
+        const t = new Date(d.closed_at).getTime();
+        return t >= yesterdayMs && t < todayMs;
+      });
+      const count = yesterdayDca.length;
+      const profit = yesterdayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const byBot = {};
+      for (const d of yesterdayDca) {
+        const name = d.bot_name || ('DCA-' + d.bot_id);
+        byBot[name] = (byBot[name] || 0) + 1;
+      }
+      const dateStr = new Date(yesterdayMs).toISOString().slice(0, 10);
+      res.end(JSON.stringify({
+        date: dateStr,
+        count, profit: Math.round(profit * 100) / 100,
+        byBot,
+        windowStart: new Date(yesterdayMs).toISOString(),
+        windowEnd: todayUTC.toISOString(),
+      }));
+    } catch(e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message, count: 0, profit: 0 }));
+    }
+    return;
+  }
+
   // ── GET /api/today-deals ─────────────────────────────────────────────────
   // Count closes since midnight UTC today across DCA + Smart Trades + Grid profit
   if (req.method === 'GET' && url === '/api/today-deals') {
