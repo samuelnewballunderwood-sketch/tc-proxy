@@ -196,6 +196,8 @@ let _lastGoodTodaySource = null;  // Raw 3Commas today-deal data (5 min cache, u
 // Daily snapshot of locked profit captured at first request after UTC midnight.
 // Used to compute today's delta when 3Commas rate-limits the deal fetches.
 let _dailySnapshot = null;  // { dayKey, dcaProfit, dcaCount, gridProfit, stProfit, capturedAt }
+// Manual TODAY override — Sam enters value from 3Commas UI when our endpoint can't get it
+let _todayTruth = null;
 async function _maybeCaptureMidnightSnapshot() {
   const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
   const dayKey = todayUTC.toISOString().slice(0,10);
@@ -1183,9 +1185,19 @@ async function handleRequest(req, res) {
       const todayCount = mergedDcaCount + gridFillCount + stCount;
       const todayProfit = mergedDcaProfit + gridProfit + Math.round(stProfit * 100) / 100;
 
-      // Fallback: if direct fetch returned 0 (3Commas rate-limited or empty result),
-      // try snapshot-delta approach using cached lifetime totals.
+      // Fallback hierarchy: manual truth > snapshot-delta > 0
       let useSnapshotDelta = false;
+      let useManualTruth = false;
+      // Check manual truth first — fresh for today's UTC day
+      if (todayCount === 0 && todayProfit === 0 && _todayTruth) {
+        const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+        const dayKey = todayUTC.toISOString().slice(0,10);
+        if (_todayTruth.dayKey === dayKey && _todayTruth.value > 0) {
+          todayProfit = _todayTruth.value;
+          todayCount = _todayTruth.count || 0;
+          useManualTruth = true;
+        }
+      }
       if (todayCount === 0 && todayProfit === 0) {
         await _maybeCaptureMidnightSnapshot();
         if (_dailySnapshot) {
@@ -1211,7 +1223,7 @@ async function handleRequest(req, res) {
       const payload = {
         count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
-        source: useSnapshotDelta ? 'snapshot-delta' : 'direct',
+        source: useManualTruth ? 'manual-truth' : useSnapshotDelta ? 'snapshot-delta' : 'direct',
         liveCount: mergedLiveCount,
         liveDca: mergedLiveDca,
         liveGrid: mergedLiveGrid,
@@ -3007,6 +3019,22 @@ async function handleRequest(req, res) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message }));
     }
+    return;
+  }
+  if (req.method === 'GET' && url === '/api/today-truth') {
+    res.end(JSON.stringify(_todayTruth || { value: null }));
+    return;
+  }
+  if (req.method === 'POST' && url === '/api/today-truth') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const value = parseFloat(body.value);
+      const count = parseInt(body.count || 0);
+      if (isNaN(value)) { res.statusCode=400; res.end(JSON.stringify({error:'value required'})); return; }
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      _todayTruth = { value, count, dayKey: todayUTC.toISOString().slice(0,10), asOf: new Date().toISOString() };
+      res.end(JSON.stringify({ success: true, ..._todayTruth }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
   if (req.method === 'GET' && url === '/api/reinvested-truth') {
