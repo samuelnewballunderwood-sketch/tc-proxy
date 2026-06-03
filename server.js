@@ -156,6 +156,8 @@ let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Comm
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
 let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
 let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
+let _lastGoodActiveDeals = null;  // 3Commas active deals cache for insufficient-funds detection
+let _lastGoodActiveDealsAt = 0;
 
 // Binance fetch cache — Render's shared IP gets rate-limited fast.
 // Per-key TTL. On '418 Too Many Requests' (IP ban), switch to a 30-minute TTL.
@@ -2411,10 +2413,18 @@ async function handleRequest(req, res) {
         tc3('/ver1/deals', 'limit=200&scope=active&account_id=33438577').catch(()=>[]),
         tc3('/ver1/deals', 'limit=200&scope=active&account_id=33439515').catch(()=>[]),
       ]);
-      const activeDeals = [
+      let activeDeals = [
         ...(Array.isArray(activeSpot) ? activeSpot : []),
         ...(Array.isArray(activeFut)  ? activeFut  : []),
       ];
+      // Cache when fresh fetch returned data; serve cache when 3Commas blocks us
+      if (activeDeals.length > 0) {
+        _lastGoodActiveDeals = activeDeals;
+        _lastGoodActiveDealsAt = Date.now();
+      } else if (_lastGoodActiveDeals && (Date.now() - _lastGoodActiveDealsAt) < 10*60*1000) {
+        // Use cache for up to 10 min — fund-fail state on a deal doesn't change second to second
+        activeDeals = _lastGoodActiveDeals;
+      }
       // A deal is "in trouble" if 3Commas marked error_state or has error_message
       const FUND_REGEX = /insufficient|not.?enough|balance|min[._ ]?notional|too[._ ]?small|-2010|-2019|reduce.{0,8}only/i;
       const botErrors = [];
