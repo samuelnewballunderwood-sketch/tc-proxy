@@ -972,16 +972,23 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      // Fetch BOTH completed (TP hit) + finished (all closed states incl. panic_sold).
-      // 'scope=completed' was missing today's deal because it was closed via panic_sell,
-      // not by hitting take-profit. Sam was seeing Today PnL $30.63 in 3Commas UI.
-      const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR] = await Promise.all([
+      // Fetch ALL closed scopes + smart trades to capture every trade type that closed today.
+      const todayUTC_pre = new Date(); todayUTC_pre.setUTCHours(0,0,0,0);
+      const todayMs_pre = todayUTC_pre.getTime();
+      const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = await Promise.all([
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33438577'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33439515'),
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
+        tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
       ]);
+      // Fetch per-grid profit history for today (DCA-style accuracy on grid fills)
+      const _gridBots = (botsR && botsR.bots || []).filter(b => b.botType === 'grid');
+      const gridProfitsPromises = _gridBots.slice(0, 10).map(b =>
+        tcFetchOne('/public/api/ver1/grid_bots/' + b.id + '/profits?limit=200')
+      );
+      const gridProfitsArrs = await Promise.all(gridProfitsPromises);
       const allBots = (botsR && botsR.bots) || [];
       const gridBots = allBots.filter(b => b.botType === 'grid').map(b => ({
         finished_deals_count: b.completedDeals || 0,
@@ -1013,10 +1020,30 @@ async function handleRequest(req, res) {
       // Total today value = gross PnL + reinvested portion
       const dcaProfit = dcaGross + dcaReinv;
 
-      // Grid bots: today profit only (per-day count not exposed by API)
+      // Grid: sum every grid bot's per-trade profit history entries from today
+      let gridProfit = 0;
+      let gridFillCount = 0;
+      gridProfitsArrs.forEach(arr => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(p => {
+          const ts = p.executed_at || p.created_at || p.updated_at;
+          if (!ts) return;
+          if (new Date(ts).getTime() < todayMs_pre) return;
+          gridProfit += parseFloat(p.profit || p.usd_profit || 0);
+          gridFillCount++;
+        });
+      });
+      gridProfit = Math.round(gridProfit * 100) / 100;
       const grids = Array.isArray(gridBots) ? gridBots : [];
       const gridLifetime = grids.reduce((s, g) => s + parseInt(g.finished_deals_count || 0), 0);
-      const gridProfit = grids.reduce((s, g) => s + parseFloat(g.total_profit_today || g.profit_today || 0), 0);
+      // Smart trade closes today (R17/R18/R25/R30 scalps)
+      const stItems = Array.isArray(smartTrades) ? smartTrades : (smartTrades?.items || []);
+      const stToday = stItems.filter(t => {
+        const ts = t.closed_at || t.updated_at;
+        return ts && new Date(ts).getTime() >= todayMs_pre;
+      });
+      const stProfit = stToday.reduce((s, t) => s + parseFloat(t.profit?.usd || t.realized_profit?.usd || 0), 0);
+      const stCount = stToday.length;
 
       // LIVE (currently open) deal count — sum activeDeals across all bots
       const liveCount = allBots.reduce((s, b) => s + parseInt(b.activeDeals || 0), 0);
@@ -1049,8 +1076,8 @@ async function handleRequest(req, res) {
       const mergedLiveCount = Math.max(liveCount, cachedLiveCount);
       const mergedLiveDca = Math.max(liveDca, cachedLiveDca);
       const mergedLiveGrid = Math.max(liveGrid, cachedLiveGrid);
-      const todayCount = mergedDcaCount;
-      const todayProfit = mergedDcaProfit + Math.round(gridProfit * 100) / 100;
+      const todayCount = mergedDcaCount + gridFillCount + stCount;
+      const todayProfit = mergedDcaProfit + gridProfit + Math.round(stProfit * 100) / 100;
 
       const payload = {
         count: todayCount,
@@ -1059,8 +1086,9 @@ async function handleRequest(req, res) {
         liveDca: mergedLiveDca,
         liveGrid: mergedLiveGrid,
         breakdown: {
-          dca:  { count: mergedDcaCount, profit: mergedDcaProfit, live: mergedLiveDca },
-          grid: { count: null, profit: Math.round(gridProfit * 100) / 100, lifetimeTotal: mergedGridLifetime, live: mergedLiveGrid, note: 'per-day grid count requires daily snapshot — profit_today summed' },
+          dca:        { count: mergedDcaCount, profit: mergedDcaProfit, live: mergedLiveDca },
+          grid:       { count: gridFillCount, profit: gridProfit, lifetimeTotal: mergedGridLifetime, live: mergedLiveGrid },
+          smartTrade: { count: stCount, profit: Math.round(stProfit * 100) / 100 },
         },
         byBot: Object.keys(byBot).length ? byBot : (_lastGoodToday?.byBot || {}),
         asOf: new Date().toISOString(),
