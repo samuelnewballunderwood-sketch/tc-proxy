@@ -149,6 +149,8 @@ let _lastGoodCapital = null;
 let _lastGoodDealsSummary = null;
 let _lastGoodToday = null;  // today-deals cache; resets when UTC day changes
 let _lastGoodTodayDay = null;
+let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
+let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
 let _kvHydrated = false;
 
 const KV_PORTFOLIO_URL = 'https://alphacontrol.ai/api/cache/portfolio';
@@ -660,10 +662,15 @@ async function handleRequest(req, res) {
         ?? 0;
       const cachedGrid = _lastGoodDealsSummary?.gridDeals || 0;
       const cachedGridP = _lastGoodDealsSummary?.gridProfit || 0;
-      const mergedDca = Math.max(dcaDeals.length, cachedDca);
-      const mergedDcaP = Math.max(Math.round(dcaProfit * 100) / 100, cachedDcaP);
-      const mergedGrid = Math.max(gridTotalDeals, cachedGrid);
-      const mergedGridP = Math.max(Math.round(gridTotalProfit * 100) / 100, cachedGridP);
+      // Trust-fresh-unless-empty: 3Commas is source of truth.
+      // HWM Math.max was sticky to deleted bots' historic profit ($154 over-count).
+      // Use fresh fetch when it returned data; fall back to cache only when fetch was empty.
+      const freshDcaOk = dcaDeals.length > 0;
+      const freshGridOk = grids.length > 0;
+      const mergedDca  = freshDcaOk ? dcaDeals.length : cachedDca;
+      const mergedDcaP = freshDcaOk ? Math.round(dcaProfit * 100) / 100 : cachedDcaP;
+      const mergedGrid  = freshGridOk ? gridTotalDeals : cachedGrid;
+      const mergedGridP = freshGridOk ? Math.round(gridTotalProfit * 100) / 100 : cachedGridP;
       const mergedTotalDeals = mergedDca + mergedGrid;
       const mergedTotalProfit = Math.round((mergedDcaP + mergedGridP) * 100) / 100;
       const payload = {
@@ -1229,14 +1236,31 @@ async function handleRequest(req, res) {
           pctOfCapital: capital > 0 ? +((d.dealProfit/capital)*100).toFixed(2) : 0,
         };
       };
-      res.end(JSON.stringify({
+      const payload = {
         capital,
         currentMonth: wrap(thisMonth),
         previousMonth: wrap(prevMonth),
         twoMonthsAgo: wrap(twoPrevMonth),
         allMonths: Object.keys(byMonth).sort().map(wrap),
-      }));
-    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+      };
+      // Last-good cache: only trust fresh payload when deals fetch actually returned data
+      // AND capital looked real. Otherwise serve cache so MTD doesn't collapse to $0.
+      const realFresh = deals.length > 0 && capital > 100;
+      if (realFresh) {
+        _lastGoodMonthly = payload;
+        res.end(JSON.stringify(payload));
+      } else if (_lastGoodMonthly) {
+        res.end(JSON.stringify({ ..._lastGoodMonthly, stale: true }));
+      } else {
+        res.end(JSON.stringify(payload));
+      }
+    } catch(e) {
+      if (_lastGoodMonthly) {
+        res.end(JSON.stringify({ ..._lastGoodMonthly, stale: true, error: e.message }));
+      } else {
+        res.statusCode=500; res.end(JSON.stringify({error:e.message}));
+      }
+    }
     return;
   }
 
@@ -2281,7 +2305,7 @@ async function handleRequest(req, res) {
         }
       }
       const idleSpotUsd = Math.max(0, totalCap - totalBotLocked - totalEarn - (futR?.marginBalance || 0));
-      res.end(JSON.stringify({
+      const payload = {
         totalCapital: totalCap,
         totalBotLocked: Math.round(totalBotLocked * 100) / 100,
         totalEarn: Math.round(totalEarn * 100) / 100,
@@ -2291,10 +2315,25 @@ async function handleRequest(req, res) {
         idleTotalUsd: Math.round((idleSpotUsd + futuresAvailable) * 100) / 100,
         perAsset,
         asOf: new Date().toISOString(),
-      }));
+      };
+      // Last-good cache: only accept a fresh payload as authoritative when audit
+      // returned at least one asset AND totalCapital looks real. Otherwise serve cache.
+      const looksReal = (Object.keys(perAsset).length > 0) && totalCap > 100;
+      if (looksReal) {
+        _lastGoodIdle = payload;
+        res.end(JSON.stringify(payload));
+      } else if (_lastGoodIdle) {
+        res.end(JSON.stringify({ ..._lastGoodIdle, stale: true }));
+      } else {
+        res.end(JSON.stringify(payload));
+      }
     } catch(e) {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: e.message }));
+      if (_lastGoodIdle) {
+        res.end(JSON.stringify({ ..._lastGoodIdle, stale: true, error: e.message }));
+      } else {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: e.message }));
+      }
     }
     return;
   }
