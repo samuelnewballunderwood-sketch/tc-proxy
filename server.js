@@ -182,6 +182,14 @@ let _lastGoodTodayDay = null;
 let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
 let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
+// Manual override for reinvested portion of DCA locked profit.
+// Sam updates this from 3Commas UI's 'Reinvested: $XXX' display.
+// Persists in-memory + can be set via POST /api/reinvested-truth.
+let _reinvestedTruth = {
+  value: parseFloat(process.env.REINVESTED_TRUTH_USD || '396.23'),
+  asOf: new Date().toISOString(),
+  source: 'env-default'
+};
 let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
 let _lastGoodActiveDeals = null;  // 3Commas active deals cache for insufficient-funds detection
 let _lastGoodActiveDealsAt = 0;
@@ -802,15 +810,9 @@ async function handleRequest(req, res) {
           }
         }
       } catch(_) {}
-      // Prefer manual 'truth' override entered from 3Commas UI (Sam's source of truth)
-      if (dcaReinvested === 0) {
-        try {
-          const tr = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/reinvested-truth');
-          if (tr.ok) {
-            const trj = await tr.json();
-            if (trj?.truth?.value > 0) dcaReinvested = parseFloat(trj.truth.value);
-          }
-        } catch(_) {}
+      // Prefer manual truth override (in-memory, instant)
+      if (dcaReinvested === 0 && _reinvestedTruth?.value > 0) {
+        dcaReinvested = _reinvestedTruth.value;
       }
       // If still nothing, derive as gross-net (estimation)
       if (dcaReinvested === 0 && dcaGross > dcaNet && dcaNet > 0) {
@@ -2780,14 +2782,19 @@ async function handleRequest(req, res) {
   }
   if (req.method === 'GET' && url === '/api/reinvested-truth') {
     try {
-      // Read manual override from worker KV (Sam enters from 3Commas UI)
-      const wr = await fetch('https://alphacontrol.ai/api/kv-get?key=reinvested:truth').catch(()=>null);
-      const wj = wr && wr.ok ? await wr.json() : null;
-      res.end(JSON.stringify({
-        truth: wj?.value || null,
-        asOf: wj?.asOf || null,
-        source: '3Commas UI manual entry',
-      }));
+      // Prefer KV-backed value if Cloudflare worker has it; fall back to in-memory.
+      let result = _reinvestedTruth;
+      try {
+        const wr = await fetch('https://alphacontrol.ai/api/kv-get?key=reinvested:truth');
+        if (wr.ok) {
+          const wj = await wr.json();
+          if (wj?.value) {
+            const parsed = typeof wj.value === 'string' ? JSON.parse(wj.value) : wj.value;
+            if (parsed?.value) result = { ...parsed, source: 'kv' };
+          }
+        }
+      } catch(_) {}
+      res.end(JSON.stringify({ truth: result, ...result }));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
@@ -2796,13 +2803,17 @@ async function handleRequest(req, res) {
       const body = JSON.parse(await readBody(req));
       const value = parseFloat(body.value);
       if (!value || value < 0) { res.statusCode=400; res.end(JSON.stringify({error:'value (number) required'})); return; }
-      const payload = { value, asOf: new Date().toISOString() };
-      // Persist via worker KV
-      const wr = await fetch('https://alphacontrol.ai/api/kv-set', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ key: 'reinvested:truth', value: JSON.stringify(payload) }),
-      });
-      res.end(JSON.stringify({ success: wr.ok, ...payload }));
+      const payload = { value, asOf: new Date().toISOString(), source: 'manual-post' };
+      // Persist in-memory immediately so tc-proxy reflects it
+      _reinvestedTruth = payload;
+      // Best-effort KV persistence (survives Render restarts when Cloudflare deploys)
+      try {
+        await fetch('https://alphacontrol.ai/api/kv-set', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ key: 'reinvested:truth', value: JSON.stringify(payload) }),
+        });
+      } catch(_) {}
+      res.end(JSON.stringify({ success: true, ...payload }));
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
