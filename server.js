@@ -3087,6 +3087,15 @@ async function handleRequest(req, res) {
     }));
     return;
   }
+  if (req.method === 'POST' && url === '/api/autonomy-pause') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const mins = Math.max(1, Math.min(30, parseInt(body.minutes || 5)));
+      autonomy.pause(mins * 60 * 1000);
+      res.end(JSON.stringify({ success: true, paused_for_minutes: mins }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/autonomy-status') {
     res.end(JSON.stringify(autonomy.getStatus()));
     return;
