@@ -802,8 +802,17 @@ async function handleRequest(req, res) {
           }
         }
       } catch(_) {}
-      // If we couldn't get the breakdown, derive reinvested as (gross - net)
-      // gross = sum of final_profit (includes reinvested), net = finished_deals_profit_usd
+      // Prefer manual 'truth' override entered from 3Commas UI (Sam's source of truth)
+      if (dcaReinvested === 0) {
+        try {
+          const tr = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/reinvested-truth');
+          if (tr.ok) {
+            const trj = await tr.json();
+            if (trj?.truth?.value > 0) dcaReinvested = parseFloat(trj.truth.value);
+          }
+        } catch(_) {}
+      }
+      // If still nothing, derive as gross-net (estimation)
       if (dcaReinvested === 0 && dcaGross > dcaNet && dcaNet > 0) {
         dcaReinvested = dcaGross - dcaNet;
       }
@@ -2767,6 +2776,34 @@ async function handleRequest(req, res) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message }));
     }
+    return;
+  }
+  if (req.method === 'GET' && url === '/api/reinvested-truth') {
+    try {
+      // Read manual override from worker KV (Sam enters from 3Commas UI)
+      const wr = await fetch('https://alphacontrol.ai/api/kv-get?key=reinvested:truth').catch(()=>null);
+      const wj = wr && wr.ok ? await wr.json() : null;
+      res.end(JSON.stringify({
+        truth: wj?.value || null,
+        asOf: wj?.asOf || null,
+        source: '3Commas UI manual entry',
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+  if (req.method === 'POST' && url === '/api/reinvested-truth') {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const value = parseFloat(body.value);
+      if (!value || value < 0) { res.statusCode=400; res.end(JSON.stringify({error:'value (number) required'})); return; }
+      const payload = { value, asOf: new Date().toISOString() };
+      // Persist via worker KV
+      const wr = await fetch('https://alphacontrol.ai/api/kv-set', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key: 'reinvested:truth', value: JSON.stringify(payload) }),
+      });
+      res.end(JSON.stringify({ success: wr.ok, ...payload }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
   if (req.method === 'GET' && url === '/api/3commas-bot-debug') {
