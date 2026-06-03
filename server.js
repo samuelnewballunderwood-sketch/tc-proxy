@@ -2307,6 +2307,41 @@ async function handleRequest(req, res) {
     return;
   }
   // ── GET /api/insufficient-funds — group fund-related failures by bot/rule
+  if (req.method === 'GET' && url === '/api/debug-deal-errors') {
+    try {
+      const tc3 = async (path, qs) => {
+        const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
+        const sig = hmacSign(TC_SECRET, fullPath);
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept':'application/json' }
+        });
+        if (r.status === 204) return [];
+        const raw = await r.text();
+        try { return JSON.parse(raw); } catch { return []; }
+      };
+      const [aSpot, aFut] = await Promise.all([
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33438577').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33439515').catch(()=>[]),
+      ]);
+      const all = [...(Array.isArray(aSpot)?aSpot:[]), ...(Array.isArray(aFut)?aFut:[])];
+      const errCandidates = all.map(d => ({
+        id: d.id,
+        bot_id: d.bot_id,
+        bot_name: d.bot_name,
+        pair: d.pair,
+        status: d.status,
+        localized_status: d.localized_status,
+        error_state: d.error_state,
+        error_message: d.error_message,
+        last_safety_order_error: d.last_safety_order_error,
+        actual_profit: d.actual_profit,
+        actual_profit_percentage: d.actual_profit_percentage,
+        all_keys: Object.keys(d),
+      }));
+      res.end(JSON.stringify({ count: all.length, deals: errCandidates }, null, 2));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/insufficient-funds') {
     try {
       // ── (1) 3Commas direct: fetch active deals + scan for bot-side errors ──
