@@ -787,32 +787,34 @@ async function handleRequest(req, res) {
       // /api/dca-detail provides finished_deals_profit_usd that matches 3Commas UI.
       // The dca-detail aggregation matches 3Commas display while final_profit sum over-counts
       // due to internal reinvestment handling.
-      let dcaProfit = 0;
-      let dcaReinvested = 0;
+      let dcaNet = 0;        // matches 3Commas UI 'PnL' display
+      let dcaReinvested = 0; // matches 3Commas UI 'Reinvested' display
+      const dcaGross = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       try {
         const ddR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/dca-detail');
         if (ddR.ok) {
           const dd = await ddR.json();
           if (dd?.summary?.totalCash != null && dd.summary.totalCash > 0) {
-            dcaProfit = parseFloat(dd.summary.totalCash);
+            dcaNet = parseFloat(dd.summary.totalCash);
           }
-          // Sam directive: locked profit INCLUDES reinvested portion
-          // (the gains compounded back into bot base orders count as locked value)
           if (dd?.summary?.totalReinvested != null && dd.summary.totalReinvested > 0) {
             dcaReinvested = parseFloat(dd.summary.totalReinvested);
-          } else {
-            // Fallback: sum raw 'reserved_quote_funds' across deals
-            dcaReinvested = dcaDeals.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
           }
         }
       } catch(_) {}
-      if (dcaProfit === 0) {
-        dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      // If we couldn't get the breakdown, derive reinvested as (gross - net)
+      // gross = sum of final_profit (includes reinvested), net = finished_deals_profit_usd
+      if (dcaReinvested === 0 && dcaGross > dcaNet && dcaNet > 0) {
+        dcaReinvested = dcaGross - dcaNet;
       }
-      // Include reinvested in DCA total — these are realised gains compounded into orders
-      dcaProfit = dcaProfit + dcaReinvested;
-      // Use the same reinvested figure we computed above (from dca-detail summary or fallback)
+      // Fallback hierarchy for net (matches 3Commas UI PnL)
+      if (dcaNet === 0) dcaNet = dcaGross;
+      // Sam directive: total locked INCLUDES reinvested portion
+      const dcaProfit = dcaNet + dcaReinvested;
+      // Reinvested = additional locked value, gross deal profit minus the net booked PnL
       const reinvested = dcaReinvested;
+      // dcaProfitForDisplay = the 3Commas 'PnL' equivalent (without reinvested)
+      const dcaProfitForDisplay = dcaNet;
       // Smart trades — finished/closed. Exclude any tagged 'SIGNAL/' (those live in Signal Fund).
       const stItems = Array.isArray(stRes) ? stRes : (stRes?.items || []);
       const stMainPool = stItems.filter(t => !/^SIGNAL\//.test(t.note || t.note_raw || ''));
@@ -860,12 +862,11 @@ async function handleRequest(req, res) {
         smartTradeDeals: mergedSt,
         activeDeals:    0,
         totalOrders,
-        totalProfit:    mergedTotalProfit,          // dca + grid + smart trade + reinvested
-        dcaProfit:      mergedDcaP,
+        totalProfit:    mergedTotalProfit,          // dca (net+reinv) + grid + smart trade
+        dcaProfit:      mergedDcaP,                 // matches 3Commas PnL + reinvested
         gridProfit:     mergedGridP,
         smartTradeProfit: mergedStP,
-        reinvested:     mergedRein,
-        // Breakdown for dashboard so it can show each component clearly
+        reinvested:     mergedRein,                 // separately surfaced for transparency
         breakdown: {
           dca:        { count: mergedDca,  profit: mergedDcaP  },
           grid:       { count: mergedGrid, profit: mergedGridP },
