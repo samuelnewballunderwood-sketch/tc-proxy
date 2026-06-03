@@ -526,6 +526,13 @@ async function handleRequest(req, res) {
           botType:       'dca',
           capital:       isEnabled ? (activeDealCapital[b.id] || parseFloat(b.base_order_volume || 0)) : 0,
           profit,
+          // ── ENRICHED FIELDS (for R35, R29, R6 and future rules) ────
+          floatingPnl:   parseFloat(b.finished_deals_profit_usd != null ? 0 : 0), // placeholder — comes from deals
+          takeProfitPct: parseFloat(b.take_profit || 0),
+          maxSafetyOrders: parseInt(b.max_safety_orders || 0),
+          completedSafetyOrders: 0,  // populated below from active deals
+          baseOrderVolUsd: parseFloat(b.base_order_volume || 0),
+          // ─────────────────────────────────────────────────────────
           completedDeals:parseInt(b.finished_deals_count || 0),
           activeDeals:   parseInt(b.active_deals_count || 0),
           direction:     b.strategy === 'short' ? 'short' : 'long',
@@ -534,6 +541,14 @@ async function handleRequest(req, res) {
           marketType:    (() => { const p = (b.pairs?.[0] || b.pair || ''); return (p.includes('_PERP') || p.includes('260925') || (b.type === 'Bot::MultiBot' && b.account_id === 33439515)) ? 'futures' : 'spot'; })(),
           active:        isEnabled,
         };
+      });
+      // Pull floatingPnl + completedSafetyOrders from open deals (1 per bot)
+      [...activeDealsSpot, ...activeDealsFut].forEach(d => {
+        const bot = dcaBots.find(b => b.id === d.bot_id);
+        if (!bot) return;
+        bot.floatingPnl = parseFloat(d.actual_usd_profit || d.usd_final_profit || 0);
+        bot.completedSafetyOrders = parseInt(d.completed_safety_orders_count || 0);
+        bot.atMaxSafetyOrders = bot.completedSafetyOrders >= bot.maxSafetyOrders && bot.maxSafetyOrders > 0;
       });
 
       // Also fetch live prices AND Binance wallet locked balances
