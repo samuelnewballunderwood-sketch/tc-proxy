@@ -975,11 +975,13 @@ async function handleRequest(req, res) {
       // Fetch ALL closed scopes + smart trades to capture every trade type that closed today.
       const todayUTC_pre = new Date(); todayUTC_pre.setUTCHours(0,0,0,0);
       const todayMs_pre = todayUTC_pre.getTime();
+      // 3Commas 'from' parameter filters deals to those updated after the given timestamp
+      const fromTs = encodeURIComponent(todayUTC_pre.toISOString());
       const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = await Promise.all([
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33439515'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33439515'),
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
         tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
       ]);
