@@ -1242,20 +1242,61 @@ async function handleRequest(req, res) {
         const raw = await r.text();
         try { return JSON.parse(raw); } catch { return []; }
       }
-      const [dealsSpot, dealsFut] = await Promise.all([
+      // Pull ALL closed events: DCA + Smart Trades + per-grid profit history.
+      // Previously this counted only DCA closes — Sam saw MTD trade count as 5 when
+      // reality includes 100+ grid order fills + smart trades in June.
+      const botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots').then(r => r.ok ? r.json() : null).catch(() => null);
+      const gridBots = ((botsR && botsR.bots) || []).filter(b => b.botType === 'grid');
+      const [dealsSpot, dealsFut, stRes, ...gridProfits] = await Promise.all([
         tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33438577').catch(()=>[]),
         tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33439515').catch(()=>[]),
+        tc3Fetch('/v2/smart_trades', 'status=finished&per_page=500').catch(()=>[]),
+        // Pull per-grid profit history (one call per active grid)
+        ...gridBots.slice(0, 20).map(b =>
+          tc3Fetch('/ver1/grid_bots/' + b.id + '/profits', 'limit=500').catch(()=>[])
+        ),
       ]);
       const deals = [...(Array.isArray(dealsSpot)?dealsSpot:[]), ...(Array.isArray(dealsFut)?dealsFut:[])];
-      // Bucket by YYYY-MM closed_at
+      const stItems = Array.isArray(stRes) ? stRes : (stRes?.items || []);
+      // Flatten grid profit entries
+      const gridEvents = [];
+      gridProfits.forEach(arr => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(p => {
+          const ts = p.executed_at || p.created_at || p.updated_at;
+          if (!ts) return;
+          gridEvents.push({ ts, profit: parseFloat(p.profit || p.usd_profit || 0) });
+        });
+      });
+      // Bucket by YYYY-MM closed_at across DCA + Smart Trades + Grid order fills
       const byMonth = {};
+      const bucket = (ts, profit) => {
+        const dt = new Date(ts);
+        if (isNaN(dt.getTime())) return;
+        const key = dt.getUTCFullYear() + '-' + String(dt.getUTCMonth()+1).padStart(2,'0');
+        byMonth[key] = byMonth[key] || { dealCount: 0, dealProfit: 0, dca: 0, grid: 0, smartTrade: 0 };
+        byMonth[key].dealCount++;
+        byMonth[key].dealProfit += profit;
+      };
       for (const d of deals) {
         if (!d.closed_at) continue;
-        const dt = new Date(d.closed_at);
-        const key = dt.getUTCFullYear() + '-' + String(dt.getUTCMonth()+1).padStart(2,'0');
-        byMonth[key] = byMonth[key] || { dealCount: 0, dealProfit: 0 };
-        byMonth[key].dealCount++;
-        byMonth[key].dealProfit += parseFloat(d.final_profit || 0);
+        bucket(d.closed_at, parseFloat(d.final_profit || 0));
+        const k = new Date(d.closed_at).toISOString().slice(0,7);
+        if (byMonth[k]) byMonth[k].dca++;
+      }
+      for (const t of stItems) {
+        const ts = t.closed_at || t.updated_at;
+        if (!ts) continue;
+        // Exclude SIGNAL/-tagged (lives in Signal Fund pocket)
+        if (/^SIGNAL\//.test(t.note || t.note_raw || '')) continue;
+        bucket(ts, parseFloat(t.profit?.usd || 0));
+        const k = new Date(ts).toISOString().slice(0,7);
+        if (byMonth[k]) byMonth[k].smartTrade++;
+      }
+      for (const g of gridEvents) {
+        bucket(g.ts, g.profit);
+        const k = new Date(g.ts).toISOString().slice(0,7);
+        if (byMonth[k]) byMonth[k].grid++;
       }
       // Get total portfolio for % calc
       const reconR = await fetch('https://alphacontrol.ai/api/decisions').then(r => r.ok ? r.json() : null).catch(()=>null);
@@ -1272,12 +1313,15 @@ async function handleRequest(req, res) {
         return new Date(Date.UTC(+y, +m-1, 1)).toLocaleString('en-GB',{month:'long', year:'numeric'});
       };
       const wrap = (key) => {
-        const d = byMonth[key] || { dealCount: 0, dealProfit: 0 };
+        const d = byMonth[key] || { dealCount: 0, dealProfit: 0, dca: 0, grid: 0, smartTrade: 0 };
         return {
           month: key,
           label: monthName(key),
           locked: +d.dealProfit.toFixed(2),
           dealCount: d.dealCount,
+          dcaCount: d.dca || 0,
+          gridCount: d.grid || 0,
+          smartTradeCount: d.smartTrade || 0,
           pctOfCapital: capital > 0 ? +((d.dealProfit/capital)*100).toFixed(2) : 0,
         };
       };
@@ -1290,7 +1334,7 @@ async function handleRequest(req, res) {
       };
       // Last-good cache: only trust fresh payload when deals fetch actually returned data
       // AND capital looked real. Otherwise serve cache so MTD doesn't collapse to $0.
-      const realFresh = deals.length > 0 && capital > 100;
+      const realFresh = (deals.length > 0 || stItems.length > 0 || gridEvents.length > 0) && capital > 100;
       if (realFresh) {
         _lastGoodMonthly = payload;
         res.end(JSON.stringify(payload));
