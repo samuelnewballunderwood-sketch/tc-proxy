@@ -1678,11 +1678,17 @@ async function handleRequest(req, res) {
         byMonth[key].dealCount++;
         byMonth[key].dealProfit += profit;
       };
+      // Per Sam directive — MTD/YTD locked includes reinvested portion of each deal
       for (const d of deals) {
         if (!d.closed_at) continue;
-        bucket(d.closed_at, parseFloat(d.final_profit || 0));
+        const gross = parseFloat(d.final_profit || 0);
+        const reinv = parseFloat(d.reserved_quote_funds || 0);
+        bucket(d.closed_at, gross + reinv);
         const k = new Date(d.closed_at).toISOString().slice(0,7);
-        if (byMonth[k]) byMonth[k].dca++;
+        if (byMonth[k]) {
+          byMonth[k].dca++;
+          byMonth[k].reinvested = (byMonth[k].reinvested || 0) + reinv;
+        }
       }
       for (const t of stItems) {
         const ts = t.closed_at || t.updated_at;
@@ -1717,7 +1723,8 @@ async function handleRequest(req, res) {
         return {
           month: key,
           label: monthName(key),
-          locked: +d.dealProfit.toFixed(2),
+          locked: +d.dealProfit.toFixed(2),  // includes reinvested per Sam directive
+          reinvested: +(d.reinvested || 0).toFixed(2),
           dealCount: d.dealCount,
           dcaCount: d.dca || 0,
           gridCount: d.grid || 0,
