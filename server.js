@@ -169,11 +169,18 @@ async function _binCached(key, ttlMs, fetcher) {
   try {
     const v = await fetcher();
     // Detect Binance ban marker in error responses
-    if (v && typeof v === 'object' && /banned until (\d+)/.test(v.msg || v.error || '')) {
+    const isErr = v && typeof v === 'object' && (v.error || v.msg);
+    if (isErr && /banned until (\d+)/.test(v.msg || v.error || '')) {
       const m = /banned until (\d+)/.exec(v.msg || v.error || '');
       if (m) _binBannedUntil = parseInt(m[1]);
     }
-    _binCache[key] = { value: v, expires: now + ttlMs };
+    // Only cache SUCCESSFUL responses — never overwrite last-good with an error
+    if (!isErr) {
+      _binCache[key] = { value: v, expires: now + ttlMs };
+      return v;
+    }
+    // Error response: return last-good if we have one, else surface the error
+    if (c) return c.value;
     return v;
   } catch(e) {
     if (c) return c.value;
