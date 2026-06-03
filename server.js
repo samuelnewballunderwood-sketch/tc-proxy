@@ -192,6 +192,8 @@ let _reinvestedTruth = {
 };
 let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
 let _lastGoodActiveDeals = null;  // 3Commas active deals cache for insufficient-funds detection
+let _lastGoodTodaySource = null;  // Raw 3Commas today-deal data (5 min cache, used by /api/today-deals + /api/yesterday-deals)
+let _lastGoodTodaySourceAt = 0;
 let _lastGoodActiveDealsAt = 0;
 
 // Binance fetch cache — Render's shared IP gets rate-limited fast.
@@ -1012,14 +1014,33 @@ async function handleRequest(req, res) {
       const todayMs_pre = todayUTC_pre.getTime();
       // 3Commas 'from' parameter filters deals to those updated after the given timestamp
       const fromTs = encodeURIComponent(todayUTC_pre.toISOString());
-      const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = await Promise.all([
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33439515'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33439515'),
-        fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
-        tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
-      ]);
+      let dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades;
+      // Cache the heavy 3Commas fetches for 5 min to avoid 429 rate-limit hits
+      const cacheAge = Date.now() - _lastGoodTodaySourceAt;
+      if (_lastGoodTodaySource && cacheAge < 5*60*1000) {
+        ({dealsSpot, dealsFut, finishedSpot, finishedFut, smartTrades} = _lastGoodTodaySource);
+        botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null);
+      } else {
+        const fetched = await Promise.all([
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33438577'),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33439515'),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33438577'),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33439515'),
+          fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
+          tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
+        ]);
+        [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = fetched;
+        // Detect 429/error wrappers — if all deal fetches errored, keep cache
+        const ok = arr => Array.isArray(arr);
+        const anyOk = ok(dealsSpot) || ok(dealsFut) || ok(finishedSpot) || ok(finishedFut);
+        if (anyOk) {
+          _lastGoodTodaySource = { dealsSpot, dealsFut, finishedSpot, finishedFut, smartTrades };
+          _lastGoodTodaySourceAt = Date.now();
+        } else if (_lastGoodTodaySource) {
+          // Fall back to cache even if expired
+          ({dealsSpot, dealsFut, finishedSpot, finishedFut, smartTrades} = _lastGoodTodaySource);
+        }
+      }
       // Fetch per-grid profit history for today (DCA-style accuracy on grid fills)
       const _gridBots = (botsR && botsR.bots || []).filter(b => b.botType === 'grid');
       const gridProfitsPromises = _gridBots.slice(0, 10).map(b =>
