@@ -919,21 +919,29 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut] = await Promise.all([
+      const [dealsSpot, dealsFut, finSpot, finFut] = await Promise.all([
         tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
         tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&account_id=33438577'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&account_id=33439515'),
       ]);
-      const allDca = [
+      const pool = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+        ...(Array.isArray(finSpot) ? finSpot : []),
+        ...(Array.isArray(finFut)  ? finFut  : []),
       ];
+      const seenY = new Set();
+      const allDca = pool.filter(d => { if (!d || !d.id || seenY.has(d.id)) return false; seenY.add(d.id); return true; });
       const yesterdayDca = allDca.filter(d => {
         if (!d.closed_at) return false;
         const t = new Date(d.closed_at).getTime();
         return t >= yesterdayMs && t < todayMs;
       });
       const count = yesterdayDca.length;
-      const profit = yesterdayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const gross = yesterdayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const reinv = yesterdayDca.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+      const profit = gross + reinv;
       const byBot = {};
       for (const d of yesterdayDca) {
         const name = d.bot_name || ('DCA-' + d.bot_id);
@@ -998,7 +1006,12 @@ async function handleRequest(req, res) {
       });
       const todayDca = allDca.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
       const dcaCount = todayDca.length;
-      const dcaProfit = todayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      // 'final_profit' is the gross USD profit per deal. reserved_quote_funds = portion
+      // that 3Commas re-injected into bot orders (counts as locked value per Sam directive).
+      const dcaGross = todayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const dcaReinv = todayDca.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+      // Total today value = gross PnL + reinvested portion
+      const dcaProfit = dcaGross + dcaReinv;
 
       // Grid bots: today profit only (per-day count not exposed by API)
       const grids = Array.isArray(gridBots) ? gridBots : [];
