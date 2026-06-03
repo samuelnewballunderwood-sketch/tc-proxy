@@ -284,10 +284,26 @@ async function handleRequest(req, res) {
   // ── GET /prices ─────────────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/prices') {
     try {
-      const r    = await fetch('https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]');
+      const SYMS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
+      // Binance rejects un-encoded brackets — encode the JSON array properly.
+      const qs = 'symbols=' + encodeURIComponent(JSON.stringify(SYMS));
+      const r    = await fetch('https://api.binance.com/api/v3/ticker/price?' + qs);
       const data = await r.json();
       const out  = {};
-      data.forEach(p => out[p.symbol] = parseFloat(p.price));
+      if (Array.isArray(data)) {
+        data.forEach(p => out[p.symbol] = parseFloat(p.price));
+      } else {
+        // Binance returned an error object — fall back to per-symbol calls
+        console.warn('[prices] multi-symbol failed:', data?.msg || data);
+        const perSymbol = await Promise.all(SYMS.map(s =>
+          fetch('https://api.binance.com/api/v3/ticker/price?symbol=' + s)
+            .then(rr => rr.ok ? rr.json() : null)
+            .catch(() => null)
+        ));
+        perSymbol.forEach((p, i) => {
+          if (p && p.price) out[SYMS[i]] = parseFloat(p.price);
+        });
+      }
       res.end(JSON.stringify(out));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
