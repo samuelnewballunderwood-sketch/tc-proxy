@@ -2118,14 +2118,20 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/api/binance-open-orders') {
     try {
       if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
-      const ts = Date.now();
-      const q = `timestamp=${ts}&recvWindow=10000`;
-      const sig = hmacSign(BN_SECRET, q);
-      const r = await fetch(`https://api.binance.com/api/v3/openOrders?${q}&signature=${sig}`, {
-        headers: { 'X-MBX-APIKEY': BN_KEY }
+      // Cache for 3 min — open orders rarely flip second to second AND this was
+      // contributing to repeat Binance IP bans.
+      const data = await _binCached('open-orders', 180_000, async () => {
+        const ts = Date.now();
+        const q = `timestamp=${ts}&recvWindow=10000`;
+        const sig = hmacSign(BN_SECRET, q);
+        const r = await fetch(`https://api.binance.com/api/v3/openOrders?${q}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': BN_KEY }
+        });
+        const d = await r.json();
+        if (!r.ok) return { error: d.msg || JSON.stringify(d), msg: d.msg };
+        return d;
       });
-      const data = await r.json();
-      if (!r.ok) { res.statusCode = r.status; res.end(JSON.stringify(data)); return; }
+      if (data && data.error) { res.statusCode = 503; res.end(JSON.stringify(data)); return; }
       // Annotate orders with age + base asset + estimated locked value
       const prices = await fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>({}));
       const annotated = (data || []).map(o => {
