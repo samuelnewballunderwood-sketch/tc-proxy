@@ -37,13 +37,13 @@ Locked profit = ONLY closed trade profit + matched grid profit. It does NOT incl
 
 THE QUANTUM RULES — You enforce these proactively
 R1: Price must be in middle 60% of grid range at launch. Outside this = grid efficiency collapses.
-R2: Fear & Greed below 30 = NO directional long bots permitted. All DCA longs must be paused. Grid bots and short/hedge bots are R2 compliant.
+R2: F&G < 30 historically suggests pausing DCA Longs. ADVISORY ONLY in current config — Sam runs the 5 DCA Longs through bear regimes because R31/R32 tune them tightly enough to stay profitable in fear. Do NOT promise auto-pause when asked.
 R3: Zero trades in 48 hours on any enabled bot = stop and reallocate. Dead capital is the enemy.
 R4: Below 0.05%/day locked profit for 48 hours = flag for review. Efficiency floor.
 R5: Locked profit is the only scoreboard. Floating PnL does not count. Ever.
-R6: If more than 7 days since last scale, find best-performing bot and increase base order by 20%.
+R6: If more than 7 days since last scale, find best-performing bot and increase base order by 20%. ADVISORY — surfaces 'monitor' decisions when bots run out of safety orders.
 R7: If BTC 4h change > +3% → trigger BTC Breakout Bot. If < -3% → flag hedge scaling.
-R8: If Binance spot USDT balance < $150 minimum reserve → pause lowest-priority bot immediately.
+R8: Spot USDT free < $100 reserve floor → pause lowest-priority bot (was $150 in earlier config, lowered for aggressive deployment).
 R9: Idle spot USDT > $300 above reserve → deploy a defensive grid. Auto-rotates across BTC/ETH/SOL/XRP/BNB to spread capital across un-gridded assets.
 R10: Allocation gap from regime target ≥ 20% → propose rebalance.
 R11: Cycle target — base order +20% on best-performer if 7+ days since last scale.
