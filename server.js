@@ -155,6 +155,7 @@ let _lastGoodTodayDay = null;
 let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
 let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
+let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
 
 // Binance fetch cache — Render's shared IP gets rate-limited fast.
 // Per-key TTL. On '418 Too Many Requests' (IP ban), switch to a 30-minute TTL.
@@ -1469,10 +1470,24 @@ async function handleRequest(req, res) {
         const sig = hmacSign(TC_SECRET, fullPath);
         return fetch('https://api.3commas.io' + fullPath, {
           headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept': 'application/json' }
-        }).then(r => r.json());
+        }).then(r => r.json()).catch(() => null);
       }
-      const dcaBots = await tcFetch('/ver1/bots', 'limit=200');
-      if (!Array.isArray(dcaBots)) throw new Error('3Commas returned non-array');
+      // Fetch from BOTH accounts so we don't miss bots on either side.
+      // The 'limit=200' call without account_id sometimes returns an error wrapper
+      // (caused 'non-array' bug) — querying each account is more reliable.
+      const [bSpot, bFut] = await Promise.all([
+        tcFetch('/ver1/bots', 'limit=200&account_id=33438577'),
+        tcFetch('/ver1/bots', 'limit=200&account_id=33439515'),
+      ]);
+      const dcaBots = [
+        ...(Array.isArray(bSpot) ? bSpot : []),
+        ...(Array.isArray(bFut)  ? bFut  : []),
+      ];
+      if (dcaBots.length === 0) {
+        // 3Commas blocked us — serve last-good if we have it
+        if (_lastGoodDcaDetail) { res.end(JSON.stringify({ ..._lastGoodDcaDetail, stale: true })); return; }
+        throw new Error('3Commas returned non-array');
+      }
 
       const out = dcaBots.map(b => {
         const baseOrderVol = parseFloat(b.base_order_volume || 0);
@@ -1527,14 +1542,20 @@ async function handleRequest(req, res) {
         : summary.totalCash;
       summary.reinvestedAvailable = hasAnyReinvested;
 
-      res.end(JSON.stringify({
+      const _payload = {
         bots: out,
         summary,
         note: 'Reinvested values come from 3Commas API field reinvested_volume_usd. Currently null on most bots because 3Commas computes it server-side and does not always populate the public API field. Cash PnL (finished_deals_profit_usd) IS accurate. Reinvesting % shows how the bot is configured (100% = compounds all profit back).',
-      }));
+      };
+      _lastGoodDcaDetail = _payload;
+      res.end(JSON.stringify(_payload));
     } catch(e) {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: e.message }));
+      if (_lastGoodDcaDetail) {
+        res.end(JSON.stringify({ ..._lastGoodDcaDetail, stale: true, error: e.message }));
+      } else {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: e.message }));
+      }
     }
     return;
   }
