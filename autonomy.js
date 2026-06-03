@@ -566,6 +566,7 @@ async function tick() {
   lastTickAt = new Date().toISOString();
   try {
     if (AUTONOMY_KILL)     { logEvent({ event: 'kill_switch_active' }); return; }
+    if (_pausedUntil > Date.now()) { return; }
     if (!AUTONOMY_ENABLED) { return; }
     if (!TC_KEY || !TC_SECRET) {
       logEvent({ event: 'config_error', detail: 'TC_KEY / TC_SECRET missing' });
@@ -691,4 +692,5 @@ function resetCooldowns() {
   return before;
 }
 
-module.exports = { getActions, getStatus, manualExecute, resetCooldowns };
+function pause(durationMs) { _pausedUntil = Date.now() + durationMs; logEvent({ event: 'autonomy_paused', untilMs: _pausedUntil }); }
+module.exports = { getActions, getStatus, manualExecute, resetCooldowns, pause };
