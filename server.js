@@ -964,6 +964,41 @@ async function handleRequest(req, res) {
 
   // ── GET /api/today-deals ─────────────────────────────────────────────────
   // Count closes since midnight UTC today across DCA + Smart Trades + Grid profit
+  if (req.method === 'GET' && url === '/api/debug-today-deals') {
+    try {
+      const tc3 = async (path) => {
+        const sig = hmacSign(TC_SECRET, path);
+        return fetch('https://api.3commas.io' + path, {
+          headers: { 'Apikey': TC_KEY, 'Signature': sig, 'Accept':'application/json' }
+        }).then(r => r.status === 204 ? [] : r.json()).catch(e => ({err:e.message}));
+      };
+      const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+      const fromTs = encodeURIComponent(todayUTC.toISOString());
+      const [a, b, c, d, e] = await Promise.all([
+        tc3('/public/api/ver1/deals?limit=10&scope=completed&account_id=33438577'),
+        tc3('/public/api/ver1/deals?limit=10&scope=finished&account_id=33438577'),
+        tc3('/public/api/ver1/deals?limit=10&scope=completed&from=' + fromTs + '&account_id=33438577'),
+        tc3('/public/api/ver1/deals?limit=10&scope=finished&from=' + fromTs + '&account_id=33438577'),
+        tc3('/public/api/ver1/deals?limit=500&scope=completed&account_id=33438577'),
+      ]);
+      const summarize = (arr) => Array.isArray(arr)
+        ? arr.slice(0, 5).map(d => ({id:d.id, bot:d.bot_name, closed_at:d.closed_at, final_profit:d.final_profit, status:d.status}))
+        : arr;
+      const allClosed500 = Array.isArray(e) ? e : [];
+      const todayMs = todayUTC.getTime();
+      const todayDeals = allClosed500.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
+      res.end(JSON.stringify({
+        today_utc_midnight: todayUTC.toISOString(),
+        completed_no_filter_sample: summarize(a),
+        finished_no_filter_sample: summarize(b),
+        completed_with_from_sample: summarize(c),
+        finished_with_from_sample: summarize(d),
+        all_completed_500_count: allClosed500.length,
+        deals_today_from_500: todayDeals.map(d => ({id:d.id, bot:d.bot_name, closed_at:d.closed_at, final_profit:d.final_profit}))
+      }, null, 2));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/today-deals') {
     try {
       function tcFetchOne(path) {
