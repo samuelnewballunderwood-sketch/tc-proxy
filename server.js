@@ -964,9 +964,14 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, botsR] = await Promise.all([
+      // Fetch BOTH completed (TP hit) + finished (all closed states incl. panic_sold).
+      // 'scope=completed' was missing today's deal because it was closed via panic_sell,
+      // not by hitting take-profit. Sam was seeing Today PnL $30.63 in 3Commas UI.
+      const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR] = await Promise.all([
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
         tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33439515'),
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
       ]);
       const allBots = (botsR && botsR.bots) || [];
@@ -978,11 +983,19 @@ async function handleRequest(req, res) {
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const todayMs = todayUTC.getTime();
 
-      // DCA deals closed today
-      const allDca = [
+      // DCA deals closed today — merge both scopes (completed + finished) and dedupe
+      const dcaPool = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
+        ...(Array.isArray(finishedSpot) ? finishedSpot : []),
+        ...(Array.isArray(finishedFut)  ? finishedFut  : []),
       ];
+      const seenDealIds = new Set();
+      const allDca = dcaPool.filter(d => {
+        if (!d || !d.id || seenDealIds.has(d.id)) return false;
+        seenDealIds.add(d.id);
+        return true;
+      });
       const todayDca = allDca.filter(d => d.closed_at && new Date(d.closed_at).getTime() >= todayMs);
       const dcaCount = todayDca.length;
       const dcaProfit = todayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
