@@ -127,6 +127,8 @@ const ALLOWLIST = [
   { actionType: 'enable',     objective: 'regime_lift'   },  // R2-LIFT: auto-resume DCAs when F&G recovers
   { actionType: 'deploy_grid', objective: 'idle_capital_deploy' }, // R9: auto-deploy idle USDT to BTC defensive grid
   { actionType: 'deploy_grid', objective: 'idle_crypto_grid'    }, // R12: per-asset grid for held crypto
+  { actionType: 'close_grid',  objective: 'grid_recycle_dead'   }, // R34: close grids with 0 trades
+  { actionType: 'close_deal',  objective: 'force_close_error_deal' }, // R35: force-close stuck error deals
   { actionType: 'redeem',      objective: 'auto_redeem'         }, // R14: auto-redeem from Binance Earn
   { actionType: 'cancel_order',objective: 'stale_order_cancel'  }, // R15: cancel stale orphan orders
   { actionType: 'tv_signal',   objective: 'tv_signal_act'     }, // R16: act on TradingView Bj Bot signals
@@ -353,16 +355,39 @@ async function executeDecision(decision, openDealBotIds) {
     } catch(e) { return [{ tuned: false, botId, error: e.message }]; }
   }
 
-  // Special path: close_grid (R19) — profit-take Hannah grid
-  if (decision.actionType === 'close_grid' && decision.objective === 'grid_profit_take') {
+  // Special path: close_grid (R19 + R34) — profit-take or recycle dead Hannah grid
+  if (decision.actionType === 'close_grid' && (decision.objective === 'grid_profit_take' || decision.objective === 'grid_recycle_dead')) {
     const targets = decision.targetBotIds || [];
     const results = [];
     for (const id of targets) {
       try {
         const r = await fetch(`https://tc-proxy-eu.onrender.com/grid-bot/${id}/disable`, { method: 'POST' });
         const body = await r.json();
-        results.push({ botId: id, closed: r.ok, body });
+        results.push({ botId: id, closed: r.ok, body, rule: decision.objective });
       } catch(e) { results.push({ botId: id, error: e.message }); }
+    }
+    return results;
+  }
+
+  // Special path: close_deal (R35) — force-close stuck DCA bot deal in error state
+  if (decision.actionType === 'close_deal' && decision.objective === 'force_close_error_deal') {
+    const botIds = decision.targetBotIds || [];
+    const results = [];
+    for (const botId of botIds) {
+      try {
+        // First disable bot to stop new deals, then panic-sell open deal
+        const dr = await fetch(`https://tc-proxy-eu.onrender.com/bot/${botId}/disable`, { method: 'POST' });
+        const drBody = await dr.json().catch(()=>({}));
+        // 3Commas active deal panic_sell — closes at market, releases locked USDT
+        const psPath = `/public/api/ver1/bots/${botId}/panic_sell_all_deals`;
+        const sig = require('crypto').createHmac('sha256', process.env.TC_API_SECRET || process.env.TC_SECRET || '').update(psPath).digest('hex');
+        const psR = await fetch('https://api.3commas.io' + psPath, {
+          method: 'POST',
+          headers: { 'Apikey': process.env.TC_API_KEY || process.env.TC_KEY, 'Signature': sig, 'Content-Type':'application/json' }
+        });
+        const psBody = await psR.text();
+        results.push({ botId, disabled: dr.ok, panicSold: psR.ok, status: psR.status, body: psBody.slice(0,200) });
+      } catch(e) { results.push({ botId, error: e.message }); }
     }
     return results;
   }
@@ -468,13 +493,15 @@ async function executeDecision(decision, openDealBotIds) {
 
     const totalQuote = Math.max(100, Math.min(2000, Math.round(decision.amount || 500)));
     const decimals = price < 1 ? 5 : price < 100 ? 4 : 2;
-    const upper = +(price * 1.10).toFixed(decimals);
-    const lower = +(price * 0.90).toFixed(decimals);
+    // Tighter range = more trade density, more yield per unit capital. Was ±10%/30 grids.
+    // ±5%/50 grids = 0.2% per grid line (was 0.67%) — better fits choppy fear regime.
+    const upper = +(price * 1.05).toFixed(decimals);
+    const lower = +(price * 0.95).toFixed(decimals);
     const spec = {
       pair,
       upperPrice: upper,
       lowerPrice: lower,
-      gridQuantity: 30,
+      gridQuantity: 50,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
       name: 'Hannah-' + _ruleCode(decision) + '-' + asset + '-' + new Date().toISOString().slice(0,10),
