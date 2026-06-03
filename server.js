@@ -960,12 +960,28 @@ async function handleRequest(req, res) {
   // ── GET /market-signals ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/market-signals') {
     try {
-      const [fgRes, domRes, fundRes, btc24hRes] = await Promise.all([
+      const [fgRes, domRes, fundRes, btc24hRes_raw] = await Promise.all([
         fetch('https://api.alternative.me/fng/?limit=1').then(r => r.json()).catch(() => null),
         fetch('https://api.coingecko.com/api/v3/global').then(r => r.json()).catch(() => null),
         fetch('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1').then(r => r.json()).catch(() => null),
         fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT').then(r => r.json()).catch(() => null),
       ]);
+      // CoinGecko fallback when Binance is banned/empty
+      let btc24hRes = btc24hRes_raw && btc24hRes_raw.priceChangePercent !== undefined ? btc24hRes_raw : null;
+      if (!btc24hRes) {
+        try {
+          const cgR = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin');
+          const cg = cgR.ok ? await cgR.json() : null;
+          if (cg && cg[0]) {
+            btc24hRes = {
+              priceChangePercent: cg[0].price_change_percentage_24h,
+              lastPrice:          cg[0].current_price,
+              highPrice:          cg[0].high_24h,
+              lowPrice:           cg[0].low_24h,
+            };
+          }
+        } catch(_) {}
+      }
 
       // Base F&G from alternative.me (daily, midnight UTC)
       const fgBase   = fgRes?.data?.[0] ? parseInt(fgRes.data[0].value) : null;
