@@ -820,12 +820,10 @@ async function handleRequest(req, res) {
       }
       // Fallback hierarchy for net (matches 3Commas UI PnL)
       if (dcaNet === 0) dcaNet = dcaGross;
-      // Sam directive: total locked INCLUDES reinvested portion
-      const dcaProfit = dcaNet + dcaReinvested;
-      // Reinvested = additional locked value, gross deal profit minus the net booked PnL
+      // dcaProfit = JUST the net (matches 3Commas 'PnL' display $464). totalProfit math
+      // below adds reinvested separately, so we don't double-count.
+      const dcaProfit = dcaNet;
       const reinvested = dcaReinvested;
-      // dcaProfitForDisplay = the 3Commas 'PnL' equivalent (without reinvested)
-      const dcaProfitForDisplay = dcaNet;
       // Smart trades — finished/closed. Exclude any tagged 'SIGNAL/' (those live in Signal Fund).
       const stItems = Array.isArray(stRes) ? stRes : (stRes?.items || []);
       const stMainPool = stItems.filter(t => !/^SIGNAL\//.test(t.note || t.note_raw || ''));
