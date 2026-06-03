@@ -329,7 +329,7 @@ async function handleRequest(req, res) {
     try {
       const SYMS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
       // Cache prices for 30s — autonomy ticks every minute, dashboard every 60-90s
-      const out = await _binCached('prices', 30_000, async () => {
+      let out = await _binCached('prices', 30_000, async () => {
         const qs = 'symbols=' + encodeURIComponent(JSON.stringify(SYMS));
         const r = await fetch('https://api.binance.com/api/v3/ticker/price?' + qs);
         const data = await r.json();
@@ -337,12 +337,30 @@ async function handleRequest(req, res) {
         if (Array.isArray(data)) {
           data.forEach(p => result[p.symbol] = parseFloat(p.price));
         } else if (data && data.msg) {
-          // Surface the ban error so _binCached can detect it
           return { error: data.msg, msg: data.msg };
         }
         return result;
       });
-      res.end(JSON.stringify(out || {}));
+      // FALLBACK: if Binance returned empty/error AND no cache, hit CoinGecko (no auth, no bans)
+      const goodKeys = out && typeof out === 'object' && !out.error
+        ? Object.keys(out).filter(k => out[k] > 0) : [];
+      if (goodKeys.length === 0) {
+        try {
+          const cgIds = 'bitcoin,ethereum,binancecoin,solana,ripple';
+          const cgR = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=' + cgIds + '&vs_currencies=usd');
+          if (cgR.ok) {
+            const cg = await cgR.json();
+            const cgPrices = {};
+            if (cg.bitcoin?.usd)     cgPrices.BTCUSDT = cg.bitcoin.usd;
+            if (cg.ethereum?.usd)    cgPrices.ETHUSDT = cg.ethereum.usd;
+            if (cg.binancecoin?.usd) cgPrices.BNBUSDT = cg.binancecoin.usd;
+            if (cg.solana?.usd)      cgPrices.SOLUSDT = cg.solana.usd;
+            if (cg.ripple?.usd)      cgPrices.XRPUSDT = cg.ripple.usd;
+            if (Object.keys(cgPrices).length > 0) out = cgPrices;
+          }
+        } catch(_) {}
+      }
+      res.end(JSON.stringify(out && !out.error ? out : (out || {})));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     return;
   }
