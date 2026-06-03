@@ -920,10 +920,10 @@ async function handleRequest(req, res) {
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
       const [dealsSpot, dealsFut, finSpot, finFut] = await Promise.all([
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&account_id=33438577'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&account_id=33439515'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33438577'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33439515'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33438577'),
+        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33439515'),
       ]);
       const pool = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
@@ -976,10 +976,10 @@ async function handleRequest(req, res) {
       const todayUTC_pre = new Date(); todayUTC_pre.setUTCHours(0,0,0,0);
       const todayMs_pre = todayUTC_pre.getTime();
       const [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = await Promise.all([
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&account_id=33439515'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33438577'),
-        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33439515'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33438577'),
+        tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33439515'),
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
         tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
       ]);
