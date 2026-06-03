@@ -165,8 +165,12 @@ async function _binCached(key, ttlMs, fetcher) {
   const now = Date.now();
   const c = _binCache[key];
   if (c && c.expires > now) return c.value;
-  // While banned, return stale cache if we have one rather than hitting Binance
-  if (_binBannedUntil > now && c) return c.value;
+  // While banned, NEVER call Binance — return last-good if any, else null. This is
+  // critical: bypassing the cache during a ban gets the IP banned again the moment
+  // the previous ban lifts, extending the ban indefinitely.
+  if (_binBannedUntil > now) {
+    return c ? c.value : null;
+  }
   try {
     const v = await fetcher();
     // Detect Binance ban marker in error responses
@@ -276,7 +280,7 @@ async function handleRequest(req, res) {
   // ── GET /spot-wallet ────────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/spot-wallet') {
     try {
-      const out = await _binCached('spot-wallet', 45_000, async () => {
+      const out = await _binCached('spot-wallet', 300_000, async () => {
         const ts  = Date.now();
         const q   = `timestamp=${ts}&recvWindow=10000`;
         const sig = hmacSign(BN_SECRET, q);
@@ -303,7 +307,7 @@ async function handleRequest(req, res) {
   // ── GET /futures-wallet ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url === '/futures-wallet') {
     try {
-      const out = await _binCached('futures-wallet', 60_000, async () => {
+      const out = await _binCached('futures-wallet', 300_000, async () => {
         const ts  = Date.now();
         const q   = `timestamp=${ts}&recvWindow=10000`;
         const sig = hmacSign(BN_SECRET, q);
@@ -330,7 +334,7 @@ async function handleRequest(req, res) {
     try {
       const SYMS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
       // Cache prices for 30s — autonomy ticks every minute, dashboard every 60-90s
-      let out = await _binCached('prices', 30_000, async () => {
+      let out = await _binCached('prices', 300_000, async () => {
         const qs = 'symbols=' + encodeURIComponent(JSON.stringify(SYMS));
         const r = await fetch('https://api.binance.com/api/v3/ticker/price?' + qs);
         const data = await r.json();
