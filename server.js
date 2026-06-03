@@ -788,6 +788,7 @@ async function handleRequest(req, res) {
       // The dca-detail aggregation matches 3Commas display while final_profit sum over-counts
       // due to internal reinvestment handling.
       let dcaProfit = 0;
+      let dcaReinvested = 0;
       try {
         const ddR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/dca-detail');
         if (ddR.ok) {
@@ -795,17 +796,23 @@ async function handleRequest(req, res) {
           if (dd?.summary?.totalCash != null && dd.summary.totalCash > 0) {
             dcaProfit = parseFloat(dd.summary.totalCash);
           }
+          // Sam directive: locked profit INCLUDES reinvested portion
+          // (the gains compounded back into bot base orders count as locked value)
+          if (dd?.summary?.totalReinvested != null && dd.summary.totalReinvested > 0) {
+            dcaReinvested = parseFloat(dd.summary.totalReinvested);
+          } else {
+            // Fallback: sum raw 'reserved_quote_funds' across deals
+            dcaReinvested = dcaDeals.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+          }
         }
       } catch(_) {}
       if (dcaProfit === 0) {
-        // Fallback to raw deal sum if dca-detail unavailable
         dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
       }
-      // Reinvested = sum of safety-order volumes funded by deal profit. 3Commas tracks this
-      // on each deal as `reserved_*` and on bots as `finished_deals_reinvested_*` but we derive
-      // from the bot stats endpoint when available, else from DCA `from_currency_is_dollars`.
-      // For now: sum 'reserved_quote_funds' across closed DCA deals (this is profit-reinvested).
-      const reinvested = dcaDeals.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+      // Include reinvested in DCA total — these are realised gains compounded into orders
+      dcaProfit = dcaProfit + dcaReinvested;
+      // Use the same reinvested figure we computed above (from dca-detail summary or fallback)
+      const reinvested = dcaReinvested;
       // Smart trades — finished/closed. Exclude any tagged 'SIGNAL/' (those live in Signal Fund).
       const stItems = Array.isArray(stRes) ? stRes : (stRes?.items || []);
       const stMainPool = stItems.filter(t => !/^SIGNAL\//.test(t.note || t.note_raw || ''));
