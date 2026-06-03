@@ -151,6 +151,7 @@ let _lastGoodToday = null;  // today-deals cache; resets when UTC day changes
 let _lastGoodTodayDay = null;
 let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
+let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
 let _kvHydrated = false;
 
 const KV_PORTFOLIO_URL = 'https://alphacontrol.ai/api/cache/portfolio';
@@ -371,10 +372,10 @@ async function handleRequest(req, res) {
       // 33438577 = Binance Spot (active DCA bots + spot grids live here)
       // 33439515 = Binance Futures (legacy hedge bots + short grids)
       const [dcaSpot, dcaFut, gridSpot, gridFut, dealsSpot, dealsFut, activeDealsSpot, activeDealsFut] = await Promise.all([
-        tc3Fetch('/ver1/bots',      'limit=100&account_id=33438577'),
-        tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515'),
-        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33438577'),
-        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515'),
+        tc3Fetch('/ver1/bots',      'limit=100&account_id=33438577').catch(e => { console.warn('[/bots] dcaSpot fail:', e.message); return []; }),
+        tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515').catch(e => { console.warn('[/bots] dcaFut fail:', e.message); return []; }),
+        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33438577').catch(e => { console.warn('[/bots] gridSpot fail:', e.message); return []; }),
+        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515').catch(e => { console.warn('[/bots] gridFut fail:', e.message); return []; }),
         tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33438577').catch(() => []),
         tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33439515').catch(() => []),
         tc3Fetch('/ver1/deals',     'limit=100&scope=active&account_id=33438577').catch(() => []),
@@ -533,8 +534,23 @@ async function handleRequest(req, res) {
       });
       const finalDca  = bots.filter(b => b.botType === 'dca');
       const finalGrid = bots.filter(b => b.botType === 'grid');
-      res.end(JSON.stringify({ bots, total: bots.length, dcaCount: finalDca.length, gridCount: finalGrid.length }));
-    } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+      const payload = { bots, total: bots.length, dcaCount: finalDca.length, gridCount: finalGrid.length };
+      // Cache last-good when we actually got bots back
+      if (bots.length > 0) {
+        _lastGoodBots = { ...payload, asOf: new Date().toISOString() };
+        res.end(JSON.stringify(payload));
+      } else if (_lastGoodBots) {
+        res.end(JSON.stringify({ ..._lastGoodBots, stale: true }));
+      } else {
+        res.end(JSON.stringify(payload));
+      }
+    } catch(e) {
+      if (_lastGoodBots) {
+        res.end(JSON.stringify({ ..._lastGoodBots, stale: true, error: e.message }));
+      } else {
+        res.statusCode = 500; res.end(JSON.stringify({ error: e.message }));
+      }
+    }
     return;
   }
 
@@ -630,10 +646,12 @@ async function handleRequest(req, res) {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, botsR] = await Promise.all([
+      const [dealsSpot, dealsFut, botsR, stRes] = await Promise.all([
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33438577'),
         tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33439515'),
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
+        // Closed smart trades (BJ Bot $50 BTC purchases, R16/R17/R25/R30 — main pool, NOT SIGNAL/ tagged)
+        tcFetch('/public/api/v2/smart_trades?status=finished&per_page=500'),
       ]);
       const dcaDeals = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
@@ -645,6 +663,16 @@ async function handleRequest(req, res) {
         total_profit: b.profit || 0,
       }));
       const dcaProfit = dcaDeals.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      // Reinvested = sum of safety-order volumes funded by deal profit. 3Commas tracks this
+      // on each deal as `reserved_*` and on bots as `finished_deals_reinvested_*` but we derive
+      // from the bot stats endpoint when available, else from DCA `from_currency_is_dollars`.
+      // For now: sum 'reserved_quote_funds' across closed DCA deals (this is profit-reinvested).
+      const reinvested = dcaDeals.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+      // Smart trades — finished/closed. Exclude any tagged 'SIGNAL/' (those live in Signal Fund).
+      const stItems = Array.isArray(stRes) ? stRes : (stRes?.items || []);
+      const stMainPool = stItems.filter(t => !/^SIGNAL\//.test(t.note || t.note_raw || ''));
+      const stProfit = stMainPool.reduce((s, t) => s + parseFloat(t.profit?.usd || t.realized_profit?.usd || 0), 0);
+      const stCount  = stMainPool.length;
       // Grid bot deals: sum finished_deals_count + total_profit across all grids
       const grids = Array.isArray(gridBots) ? gridBots : [];
       const gridTotalDeals = grids.reduce((s, g) => s + parseInt(g.finished_deals_count || 0), 0);
@@ -671,22 +699,39 @@ async function handleRequest(req, res) {
       const mergedDcaP = freshDcaOk ? Math.round(dcaProfit * 100) / 100 : cachedDcaP;
       const mergedGrid  = freshGridOk ? gridTotalDeals : cachedGrid;
       const mergedGridP = freshGridOk ? Math.round(gridTotalProfit * 100) / 100 : cachedGridP;
-      const mergedTotalDeals = mergedDca + mergedGrid;
-      const mergedTotalProfit = Math.round((mergedDcaP + mergedGridP) * 100) / 100;
+      const cachedSt = _lastGoodDealsSummary?.smartTradeDeals || 0;
+      const cachedStP = _lastGoodDealsSummary?.smartTradeProfit || 0;
+      const cachedRein = _lastGoodDealsSummary?.reinvested || 0;
+      const mergedSt   = stMainPool.length > 0 ? stCount  : cachedSt;
+      const mergedStP  = stMainPool.length > 0 ? Math.round(stProfit * 100) / 100 : cachedStP;
+      const mergedRein = freshDcaOk ? Math.round(reinvested * 100) / 100 : cachedRein;
+      const mergedTotalDeals = mergedDca + mergedGrid + mergedSt;
+      // Locked profit INCLUDES smart trades + reinvested (Sam's explicit ask)
+      const mergedTotalProfit = Math.round((mergedDcaP + mergedGridP + mergedStP + mergedRein) * 100) / 100;
       const payload = {
         completedDeals: mergedTotalDeals,
         dcaDeals: mergedDca,
         gridDeals: mergedGrid,
+        smartTradeDeals: mergedSt,
         activeDeals:    0,
         totalOrders,
-        totalProfit:    mergedTotalProfit,
+        totalProfit:    mergedTotalProfit,          // dca + grid + smart trade + reinvested
         dcaProfit:      mergedDcaP,
         gridProfit:     mergedGridP,
+        smartTradeProfit: mergedStP,
+        reinvested:     mergedRein,
+        // Breakdown for dashboard so it can show each component clearly
+        breakdown: {
+          dca:        { count: mergedDca,  profit: mergedDcaP  },
+          grid:       { count: mergedGrid, profit: mergedGridP },
+          smartTrade: { count: mergedSt,   profit: mergedStP   },
+          reinvested: mergedRein,
+        },
       };
       // Also keep backward compat: old code may reference `deals.length`
       const deals = dcaDeals;
       // Cache last-good (save when either DCA or Grid returned real data)
-      if ((dcaDeals.length > 0 || gridTotalDeals > 0) && payload.totalProfit > 0) {
+      if ((dcaDeals.length > 0 || gridTotalDeals > 0 || stMainPool.length > 0) && payload.totalProfit > 0) {
         _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
         _kvSnapshot();
         res.end(JSON.stringify(payload));
