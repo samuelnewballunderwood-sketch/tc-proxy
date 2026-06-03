@@ -193,6 +193,52 @@ let _reinvestedTruth = {
 let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
 let _lastGoodActiveDeals = null;  // 3Commas active deals cache for insufficient-funds detection
 let _lastGoodTodaySource = null;  // Raw 3Commas today-deal data (5 min cache, used by /api/today-deals + /api/yesterday-deals)
+// Daily snapshot of locked profit captured at first request after UTC midnight.
+// Used to compute today's delta when 3Commas rate-limits the deal fetches.
+let _dailySnapshot = null;  // { dayKey, dcaProfit, dcaCount, gridProfit, stProfit, capturedAt }
+async function _maybeCaptureMidnightSnapshot() {
+  const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
+  const dayKey = todayUTC.toISOString().slice(0,10);
+  if (_dailySnapshot && _dailySnapshot.dayKey === dayKey) return;
+  // First call after UTC midnight — try to capture yesterday's end totals from KV first
+  try {
+    const kvR = await fetch('https://alphacontrol.ai/api/kv-get?key=daily-snapshot:' + dayKey);
+    if (kvR.ok) {
+      const kvJ = await kvR.json();
+      if (kvJ.value) {
+        const parsed = typeof kvJ.value === 'string' ? JSON.parse(kvJ.value) : kvJ.value;
+        if (parsed?.dayKey === dayKey) {
+          _dailySnapshot = parsed;
+          return;
+        }
+      }
+    }
+  } catch(_) {}
+  // No existing snapshot — capture NOW (best we can do mid-day)
+  try {
+    const [ddR, dsR] = await Promise.all([
+      fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/dca-detail').then(r => r.ok ? r.json() : null).catch(()=>null),
+      fetch('http://localhost:' + (process.env.PORT || 3000) + '/deals/summary').then(r => r.ok ? r.json() : null).catch(()=>null),
+    ]);
+    const totalDcaProfit = parseFloat(ddR?.summary?.totalCash || 0);
+    const totalDcaCount = (ddR?.bots || []).reduce((s,b) => s + (b.finishedDeals||0), 0);
+    const totalGridProfit = parseFloat(dsR?.gridProfit || 0);
+    _dailySnapshot = {
+      dayKey,
+      dcaProfit: totalDcaProfit,
+      dcaCount: totalDcaCount,
+      gridProfit: totalGridProfit,
+      capturedAt: new Date().toISOString(),
+      capturedMidDay: true,  // mark that we didn't capture at actual midnight
+    };
+    try {
+      await fetch('https://alphacontrol.ai/api/kv-set', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key: 'daily-snapshot:' + dayKey, value: JSON.stringify(_dailySnapshot) })
+      });
+    } catch(_) {}
+  } catch(_) {}
+}
 let _lastGoodTodaySourceAt = 0;
 let _lastGoodActiveDealsAt = 0;
 
@@ -1137,9 +1183,35 @@ async function handleRequest(req, res) {
       const todayCount = mergedDcaCount + gridFillCount + stCount;
       const todayProfit = mergedDcaProfit + gridProfit + Math.round(stProfit * 100) / 100;
 
+      // Fallback: if direct fetch returned 0 (3Commas rate-limited or empty result),
+      // try snapshot-delta approach using cached lifetime totals.
+      let useSnapshotDelta = false;
+      if (todayCount === 0 && todayProfit === 0) {
+        await _maybeCaptureMidnightSnapshot();
+        if (_dailySnapshot) {
+          try {
+            const [ddR, dsR] = await Promise.all([
+              fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/dca-detail').then(r => r.ok ? r.json() : null).catch(()=>null),
+              fetch('http://localhost:' + (process.env.PORT || 3000) + '/deals/summary').then(r => r.ok ? r.json() : null).catch(()=>null),
+            ]);
+            const curDcaProfit = parseFloat(ddR?.summary?.totalCash || 0);
+            const curDcaCount = (ddR?.bots || []).reduce((s,b) => s + (b.finishedDeals||0), 0);
+            const curGridProfit = parseFloat(dsR?.gridProfit || 0);
+            const dcaDelta = Math.max(0, curDcaProfit - _dailySnapshot.dcaProfit);
+            const countDelta = Math.max(0, curDcaCount - _dailySnapshot.dcaCount);
+            const gridDelta = Math.max(0, curGridProfit - _dailySnapshot.gridProfit);
+            if (dcaDelta > 0 || countDelta > 0 || gridDelta > 0) {
+              todayCount = countDelta;
+              todayProfit = dcaDelta + gridDelta;
+              useSnapshotDelta = true;
+            }
+          } catch(_) {}
+        }
+      }
       const payload = {
         count: todayCount,
         profit: Math.round(todayProfit * 100) / 100,
+        source: useSnapshotDelta ? 'snapshot-delta' : 'direct',
         liveCount: mergedLiveCount,
         liveDca: mergedLiveDca,
         liveGrid: mergedLiveGrid,
