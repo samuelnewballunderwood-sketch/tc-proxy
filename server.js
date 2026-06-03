@@ -44,6 +44,33 @@ R5: Locked profit is the only scoreboard. Floating PnL does not count. Ever.
 R6: If more than 7 days since last scale, find best-performing bot and increase base order by 20%.
 R7: If BTC 4h change > +3% → trigger BTC Breakout Bot. If < -3% → flag hedge scaling.
 R8: If Binance spot USDT balance < $150 minimum reserve → pause lowest-priority bot immediately.
+R9: Idle spot USDT > $300 above reserve → deploy a defensive grid. Auto-rotates across BTC/ETH/SOL/XRP/BNB to spread capital across un-gridded assets.
+R10: Allocation gap from regime target ≥ 20% → propose rebalance.
+R11: Cycle target — base order +20% on best-performer if 7+ days since last scale.
+R12: Per-asset stable grid for any crypto held > $200 worth on Binance spot.
+R13: Hedge/long exposure flag — surface ratio drift for review.
+R14: Redeem Binance Earn locked USDT when spot reserve breached + R12/R9 blocked.
+R15: Cancel spot orders idle > 48h to free trapped capital.
+R16: TradingView Bj Bot alerts → $50 spot Smart Trade (0.8% TP, 1.0% SL).
+R17: F&G < 15 → $30 BTC accumulate per fire ($35 in F&G<10), up to 10/day. Smaller bites, more shots, averaging across price points in deep fear.
+R18: BTC perp funding rate extreme (>0.05% or <-0.03%) → $100 contrarian Smart Trade.
+R19: Hannah grid profit ≥ 1.5% of capital (2.5% if <$100 cap) → close + bank locked. R9 redeploys next tick.
+R20: Grid range auto-recenter — price outside middle 60% AND 0 trades in 12h → close + redeploy.
+R21: Recycle winner — best-performing closed grid auto-relaunches.
+R22: Cycle scale — scale winning grid capital after profit-take.
+R23: Per-rule P&L attribution — track which rules earn what.
+R24: BTC dominance break — rotate to alt grids if BTC.D drops > 1% in 4h.
+R25: Momentum scalp — BTC 4h move > 4.5% → fade with $50 Smart Trade.
+R26: OI spike — $50 contrarian Smart Trade on extreme funding/OI divergence.
+R27: Daily drawdown circuit breaker (FUTURE — not implemented).
+R28: Volume surge — $50 Smart Trade on volume > 3× 24h average.
+R29: Auto-disable bots violating R3 or R4.
+R30: Liquidation cascade — $50 contrarian buy on >$50M liquidations.
+R31: Auto-tune DCA take-profit % by F&G regime (0.8% in F&G<10, 1.0% in F&G<30, 1.5% neutral, 1.8% in F&G<80, 2.2% in F&G>80). 6h cooldown per bot, 2 tunes/day max.
+R32: Auto-tune DCA safety-order step % by F&G + BTC volatility (4.5%→4%→3.5%→3%→2.5% by regime). 6h cooldown per bot, 2/day cap.
+R33: Spot USDT free < $100 AND futures available > $300 → recommend manual transfer Futures → Spot via Binance UI to unlock R9 grid deploy.
+R34: Hannah grid active but 0 trades since launch → auto-close, R9 redeploys at current price.
+R35: DCA bot deal in Error state AND floating loss < 3% of bot capital → auto-disable bot + panic_sell open deals to release locked USDT. Larger losses surfaced as advisory only.
 
 REGIME CLASSIFICATION
 BULL: F&G > 50, BTC above 200 EMA, 24h change > +1% → Scale DCA longs, reduce shorts
