@@ -20,6 +20,7 @@ const WORKER_BASE       = process.env.WORKER_BASE        || 'https://alphacontro
 const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   !== 'false'; // default ON (set 'false' to disable)
 const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   === 'true';  // default OFF — trade live (set 'true' for dry-run)
 const AUTONOMY_KILL     = process.env.AUTONOMY_KILL_SWITCH === 'true';
+let _pausedUntil = 0;  // runtime pause for autonomy ticks (used by pause())
 const AUTONOMY_MAX      = parseInt(process.env.AUTONOMY_MAX_PER_CYCLE  || '8', 10);
 const AUTONOMY_MIN_CONF = parseInt(process.env.AUTONOMY_MIN_CONFIDENCE || '50', 10);
 
