@@ -1180,8 +1180,17 @@ async function handleRequest(req, res) {
       const mergedLiveCount = Math.max(liveCount, cachedLiveCount);
       const mergedLiveDca = Math.max(liveDca, cachedLiveDca);
       const mergedLiveGrid = Math.max(liveGrid, cachedLiveGrid);
-      const todayCount = mergedDcaCount + gridFillCount + stCount;
-      const todayProfit = mergedDcaProfit + gridProfit + Math.round(stProfit * 100) / 100;
+      // HWM grid + smart trade counts (never drop within UTC day)
+      const cachedGridCount = _lastGoodToday?.breakdown?.grid?.count || 0;
+      const cachedGridProfit = _lastGoodToday?.breakdown?.grid?.profit || 0;
+      const cachedStCount = _lastGoodToday?.breakdown?.smartTrade?.count || 0;
+      const cachedStProfit = _lastGoodToday?.breakdown?.smartTrade?.profit || 0;
+      const mergedGridCount = Math.max(gridFillCount, cachedGridCount);
+      const mergedGridProfit = Math.max(gridProfit, cachedGridProfit);
+      const mergedStCount = Math.max(stCount, cachedStCount);
+      const mergedStProfit = Math.max(Math.round(stProfit * 100) / 100, cachedStProfit);
+      let todayCount = mergedDcaCount + mergedGridCount + mergedStCount;
+      let todayProfit = mergedDcaProfit + mergedGridProfit + mergedStProfit;
 
       let useSnapshotDelta = false;
       if (todayCount === 0 && todayProfit === 0) {
@@ -1215,15 +1224,15 @@ async function handleRequest(req, res) {
         liveGrid: mergedLiveGrid,
         breakdown: {
           dca:        { count: mergedDcaCount, profit: mergedDcaProfit, live: mergedLiveDca },
-          grid:       { count: gridFillCount, profit: gridProfit, lifetimeTotal: mergedGridLifetime, live: mergedLiveGrid },
-          smartTrade: { count: stCount, profit: Math.round(stProfit * 100) / 100 },
+          grid:       { count: mergedGridCount, profit: mergedGridProfit, lifetimeTotal: mergedGridLifetime, live: mergedLiveGrid },
+          smartTrade: { count: mergedStCount, profit: mergedStProfit },
         },
         byBot: Object.keys(byBot).length ? byBot : (_lastGoodToday?.byBot || {}),
         asOf: new Date().toISOString(),
         windowStart: todayUTC.toISOString(),
       };
 
-      if (mergedDcaCount > 0 || gridLifetime > 0 || mergedLiveCount > 0) {
+      if (mergedDcaCount > 0 || mergedGridCount > 0 || mergedStCount > 0 || gridLifetime > 0 || mergedLiveCount > 0) {
         _lastGoodToday = payload;
       }
 
