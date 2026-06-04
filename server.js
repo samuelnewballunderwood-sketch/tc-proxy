@@ -3093,6 +3093,49 @@ async function handleRequest(req, res) {
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
+  if (req.method === 'GET' && url === '/api/system-health') {
+    try {
+      const issues = [];
+      const now = Date.now();
+      // 1) Autonomy tick errors in last hour
+      const acts = autonomy.getActions(500);
+      const sinceHour = now - 60*60*1000;
+      const recentActs = acts.filter(a => new Date(a.ts).getTime() >= sinceHour);
+      const tickErrors = recentActs.filter(a => a.event === 'tick_error').length;
+      const lastExec = recentActs.find(a => a.event === 'executed');
+      const lastExecMs = lastExec ? new Date(lastExec.ts).getTime() : 0;
+      const minsSinceExec = lastExecMs ? Math.round((now - lastExecMs)/60000) : null;
+      if (tickErrors >= 3) issues.push({ severity: 'critical', code: 'autonomy_crash_loop', detail: tickErrors + ' tick errors in last hour', fix: 'Check /api/autonomy-status lastTickError' });
+      if (minsSinceExec === null || minsSinceExec > 30) issues.push({ severity: 'critical', code: 'autonomy_idle', detail: 'No successful execution in ' + (minsSinceExec || '>1h'), fix: 'Hannah may be in error state — restart Render service' });
+      // 2) Binance ban
+      const banLeft = Math.max(0, _binBannedUntil - now);
+      if (banLeft > 0) issues.push({ severity: 'degraded', code: 'binance_ban', detail: Math.round(banLeft/60000) + ' min remaining', fix: 'Will auto-recover when ban window expires' });
+      // 3) 3Commas 429 rate
+      const recent3CErrors = recentActs.filter(a => /too many|429|rate.?limit/i.test(JSON.stringify(a.results || a.error || ''))).length;
+      if (recent3CErrors >= 5) issues.push({ severity: 'degraded', code: '3commas_throttled', detail: recent3CErrors + ' rate-limit hits in last hour', fix: 'Caches will absorb — values may be stale' });
+      // 4) Stale deals/summary
+      if (_lastGoodDealsSummary?.asOf) {
+        const ageMins = Math.round((now - new Date(_lastGoodDealsSummary.asOf).getTime())/60000);
+        if (ageMins > 60) issues.push({ severity: 'degraded', code: 'stale_deals_summary', detail: '/deals/summary cache ' + ageMins + 'm old', fix: 'Awaiting fresh 3Commas response' });
+      }
+      const status = issues.find(i => i.severity === 'critical') ? 'critical'
+                   : issues.find(i => i.severity === 'degraded') ? 'degraded'
+                   : 'ok';
+      res.end(JSON.stringify({
+        status,
+        issues,
+        stats: {
+          tick_errors_1h: tickErrors,
+          successful_actions_1h: recentActs.filter(a => a.event === 'executed').length,
+          mins_since_last_exec: minsSinceExec,
+          binance_banned: banLeft > 0,
+          binance_ban_mins_left: Math.round(banLeft/60000),
+        },
+        checked_at: new Date(now).toISOString(),
+      }));
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
   if (req.method === 'GET' && url === '/api/binance-ban-status') {
     const now = Date.now();
     res.end(JSON.stringify({
