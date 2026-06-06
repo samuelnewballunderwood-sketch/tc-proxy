@@ -1600,6 +1600,38 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Probe 3Commas public API for trading_analytics equivalent ──
+  if (req.method === 'GET' && url === '/api/probe-3c-analytics') {
+    res.setHeader('Content-Type', 'application/json');
+    const KEY = process.env.TC_API_KEY || process.env.TC_KEY || '';
+    const SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
+    const candidates = [
+      '/ver1/users/dca_trading_analytics',
+      '/ver1/dca/trading_analytics',
+      '/ver1/users/me/trading_analytics',
+      '/ver1/users/trading_analytics',
+      '/ver1/bots/dca_trading_analytics',
+      '/ver1/dca/bots/trading_analytics',
+      '/ver1/users/aggregate_stats',
+      '/ver1/users/dca_stats',
+    ];
+    const out = {};
+    for (const path of candidates) {
+      try {
+        const fullPath = '/public/api' + path;
+        const sig = require('crypto').createHmac('sha256', SECRET).update(fullPath).digest('hex');
+        const r = await fetch('https://api.3commas.io' + fullPath, {
+          method: 'GET',
+          headers: { 'Apikey': KEY, 'Signature': sig, 'Accept': 'application/json' }
+        });
+        const txt = await r.text();
+        out[path] = { status: r.status, body: txt.slice(0, 400) };
+      } catch(e) { out[path] = { error: e.message }; }
+    }
+    res.end(JSON.stringify(out, null, 2));
+    return;
+  }
+
   // ── Learning loop v1: aggregates the persistent action log ──
   if (req.method === 'GET' && url === '/api/learning') {
     try {
