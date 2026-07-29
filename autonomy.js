@@ -718,13 +718,18 @@ async function tick() {
   }
 }
 
-// Watchdog: every 90s, if tick hasn't fired recently, kick a fresh one.
-// Prevents permanent stalls if the main loop is somehow lost.
+// Watchdog: checks every 60s, kicks a tick only if the loop has genuinely
+// stalled. The threshold MUST exceed the longest legitimate cadence returned
+// by nextDelayMs() — 15 min in bull regime. At the previous 90s it fired
+// almost continuously, forcing a ~2 min effective tick rate against an
+// intended 3-15 min, and silently defeating the Binance rate-limit tuning
+// that cadence exists for.
+const WATCHDOG_STALE_MS = 20 * 60 * 1000;
 setInterval(() => {
   try {
     const lastMs = lastTickAt ? new Date(lastTickAt).getTime() : 0;
     const ageMs = Date.now() - lastMs;
-    if (ageMs > 90_000) {
+    if (ageMs > WATCHDOG_STALE_MS) {
       logEvent({ event: 'watchdog_kick', ageMs });
       // Don't await — fire and continue
       tick().catch(e => logEvent({ event: 'watchdog_kick_failed', error: String(e) }));
