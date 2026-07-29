@@ -594,7 +594,25 @@ async function nextDelayMs() {
 }
 
 // ── One tick ─────────────────────────────────────────────────────────
+// ── Tick re-entrancy guard ───────────────────────────────────────────
+// lastTickAt is stamped at tick START, and the watchdog kicks a fresh tick when
+// that stamp is >90s old. A tick whose body runs longer than 90s therefore gets
+// a concurrent twin spawned on top of it — which is the duplicate-action race.
+// This guard makes tick() single-flight.
+//
+// TICK_STALE_MS is the escape valve: without it, one hung tick would latch the
+// mutex closed and silently kill the autonomy loop for good.
+let _tickInFlight = false;
+let _tickStartedAt = 0;
+const TICK_STALE_MS = 5 * 60 * 1000;
+
 async function tick() {
+  if (_tickInFlight && (Date.now() - _tickStartedAt) < TICK_STALE_MS) {
+    logEvent({ event: 'tick_skipped_inflight', inFlightMs: Date.now() - _tickStartedAt });
+    return;
+  }
+  _tickInFlight = true;
+  _tickStartedAt = Date.now();
   lastTickAt = new Date().toISOString();
   try {
     if (AUTONOMY_KILL)     { logEvent({ event: 'kill_switch_active' }); return; }
@@ -676,6 +694,7 @@ async function tick() {
     lastTickError = String(e);
     logEvent({ event: 'tick_error', error: String(e) });
   } finally {
+    _tickInFlight = false;
     try {
       const ms = await Promise.race([
         nextDelayMs(),
