@@ -1,11 +1,115 @@
+# tc-proxy — Render service definition
+#
+# REPLACES the 2-variable render.yaml currently in the repo.
+#
+# The code reads 31 environment variables. The committed render.yaml declares 2.
+# On a fresh deploy the other 29 are undefined, and the autonomy defaults are
+# FAIL-LIVE, not fail-safe:
+#
+#   AUTONOMY_ENABLED = process.env.AUTONOMY_ENABLED   !== 'false'   -> defaults ON
+#   AUTONOMY_DRY_RUN = process.env.AUTONOMY_DRY_RUN   === 'true'    -> defaults OFF (trades live)
+#   AUTONOMY_KILL    = process.env.AUTONOMY_KILL_SWITCH === 'true'  -> defaults off
+#   AUTONOMY_MAX_PER_CYCLE || '8'                                   -> laptop runs 2
+#   AUTONOMY_MIN_CONFIDENCE || '50'                                 -> laptop runs 70
+#
+# So deploying the repo as-is starts a SECOND live-trading engine, more
+# aggressive than the one on the laptop, executing in parallel against the same
+# 3Commas and Binance accounts.
+#
+# This file therefore pins the three safety switches to explicit safe values.
+# Do not remove them until after cutover is verified (see MIGRATION_RUNBOOK.md).
+#
+# Note: the header comments in autonomy.js lines 10-15 describe the opposite
+# defaults (dry-run on, max 2, confidence 80). The comments are wrong; the code
+# is what runs.
+
 services:
   - type: web
     name: tc-proxy
     runtime: node
+    plan: starter          # NOT free — free instances spin down on inactivity,
+                           # which reproduces the laptop problem we are solving
+    region: frankfurt
     buildCommand: npm install
     startCommand: node server.js
+    healthCheckPath: /api/autonomy-status
+    autoDeploy: true       # the whole point: pushes must reach production
+
     envVars:
+      # ── Safety switches — DELIBERATELY SET SAFE FOR FIRST BOOT ──────────
+      - key: AUTONOMY_KILL_SWITCH
+        value: "true"      # halts all action. Flip to "false" only at cutover.
+      - key: AUTONOMY_DRY_RUN
+        value: "true"      # logs "would have done X" instead of executing
+      - key: AUTONOMY_ENABLED
+        value: "false"     # belt and braces
+
+      # ── Must match the laptop instance exactly (currently 2 and 70) ─────
+      - key: AUTONOMY_MAX_PER_CYCLE
+        value: "2"
+      - key: AUTONOMY_MIN_CONFIDENCE
+        value: "70"
+
+      # ── Rule caps — copy live values from the laptop before cutover ─────
+      - key: R17_DAILY_CAP
+        sync: false
+      - key: DISCRETIONARY_DAILY_CAP_USD
+        sync: false
+      - key: SIGNAL_DAILY_CAP_USD
+        sync: false
+      - key: SIGNAL_FUND_ALLOCATION_USD
+        sync: false
+      - key: REINVESTED_TRUTH_USD
+        sync: false
+
+      # ── 3Commas ────────────────────────────────────────────────────────
+      # Code resolves TC_API_KEY || TC_KEY, and TC_API_SECRET || TC_SECRET.
+      # Set the TC_API_* pair; the others exist only as legacy fallbacks.
       - key: TC_API_KEY
         sync: false
-      - key: TC_SECRET
+      - key: TC_API_SECRET
         sync: false
+
+      # ── Binance ────────────────────────────────────────────────────────
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_SECRET
+        sync: false
+
+      # ── Worker / routing ───────────────────────────────────────────────
+      - key: WORKER_BASE
+        value: https://alphacontrol.ai
+
+      # ── AI + voice ─────────────────────────────────────────────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: SIMLI_API_KEY
+        sync: false
+      - key: SIMLI_FACE_ID
+        sync: false
+
+      # ── Alerting / webhooks ────────────────────────────────────────────
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALERT_EMAIL
+        sync: false
+      - key: TV_WEBHOOK_SECRET
+        sync: false
+
+      # ── eToro (stubbed; keep dry-run on) ───────────────────────────────
+      - key: ETORO_DRY_RUN
+        value: "true"
+      - key: ETORO_API_KEY
+        sync: false
+      - key: ETORO_USER_KEY
+        sync: false
+      - key: ETORO_ENV
+        sync: false
+
+# PORT is injected by Render automatically. server.js already binds to it.
