@@ -264,6 +264,36 @@ function _isInFailCooldown(d) {
   if (Date.now() - rec.firstTs > FAIL_WINDOW_MS) { _failedAttempts.delete(key); return false; }
   return rec.count >= FAIL_CAP;
 }
+// ── Failure detection ────────────────────────────────────────────────
+// Every shape an executor can return when the action did NOT take effect.
+// Conservative by design: only known failure signals count as failures, so a
+// success is never mis-flagged into cooldown. A malformed/absent result is
+// treated as a failure — erring toward "stop trading" is the safe direction.
+function _isFailedResult(r) {
+  if (!r || typeof r !== 'object') return true;
+  if (r.error) return true;                                   // generic
+  if (r.skipped) return true;                                 // dedupe skip
+  if (r.created === false) return true;                       // grid create
+  if (r.smartTradeCreated === false) return true;             // 3Commas smart trade
+  if (r.cancelled === false) return true;                     // order cancel
+  if (typeof r.status === 'number' && r.status >= 400) return true;
+  if (r.response && r.response.error) return true;            // nested proxy error
+  if (r.body && r.body.result && Number(r.body.result.code) < 0) return true; // Binance -1003 etc
+  return false;
+}
+
+function _failReason(r) {
+  if (!r || typeof r !== 'object') return 'no_result';
+  const reason =
+    r.error ||
+    (r.response && r.response.error) ||
+    (r.body && r.body.result && r.body.result.msg) ||
+    (typeof r.status === 'number' && r.status >= 400 ? 'http_' + r.status : null) ||
+    (r.skipped ? 'skipped' : null) ||
+    'unknown';
+  return String(reason).slice(0, 200);
+}
+
 function _recordFail(d) {
   const key = _failKey(d);
   const rec = _failedAttempts.get(key) || { count: 0, firstTs: Date.now() };
@@ -624,11 +654,20 @@ async function tick() {
         logEvent({ event: 'dry_run', decision: d });
       } else {
         const results = await executeDecision(d, openDeals);
-        // Track failures for cooldown
-        if (results?.[0]?.error || results?.[0]?.skipped || results?.[0]?.created === false) {
-          _recordFail(d);
-        }
-        logEvent({ event: 'executed', decision: d, results });
+        // Track failures for cooldown.
+        // Executors return several distinct failure shapes; _isFailedResult
+        // covers all of them. The previous predicate matched none, which is why
+        // the cooldown never engaged. See _isFailedResult below.
+        const _failedResults = Array.isArray(results) ? results.filter(_isFailedResult) : [results];
+        const _actionOk = Array.isArray(results) && results.length > 0 && _failedResults.length === 0;
+        if (!_actionOk) _recordFail(d);
+        logEvent({
+          event: _actionOk ? 'executed' : 'failed',
+          outcome: _actionOk ? 'success' : 'failure',
+          failureReason: _actionOk ? null : _failReason(_failedResults[0]),
+          decision: d,
+          results
+        });
       }
       acted++;
     }
