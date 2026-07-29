@@ -22,9 +22,14 @@ This box also runs The Bottle Store services (`nginx`, `nofilterclub.service`).
 - **bjbots-dashboard**: source of truth is **GitHub**. Cloudflare Worker,
   deploys from `main` on push. The copy on this box is stale.
 
-Production runs from branch **`production-live-20260729`**, not `main`.
-Do NOT `git pull` `main` onto this box — it clobbers server-side changes that
-exist nowhere else.
+Production runs from **`main`**. Reconciled 29 Jul 2026: `main` was reset to
+the live server state, because the server was the only place the real code
+existed. Pre-reconciliation history is preserved on `main-archive-20260729`;
+`production-live-20260729` is kept as a dated snapshot.
+
+Before pulling onto the box, always run `git status` first. A dirty working
+tree means someone edited production directly and those changes exist nowhere
+else — commit them before pulling anything.
 
 ### Restart
 
@@ -115,5 +120,8 @@ looks like proof orders never fired.
 
 - Ticks routinely exceed 90s; the watchdog, not the scheduler, drives the loop.
 - Action log does not persist — blocks outcome-based learning across restarts.
-- `main` and `production-live-20260729` need reconciling.
+- Sam's PORT fix (`8839f24`) is NOT in production. `autonomy.js` still hardcodes
+  `localhost:9090` in `executeDecision`. Works today because the server listens
+  on 9090, but setting `PORT` in `.env` would silently break execution while
+  the API stays up.
 - Splash says "ADVISORY — YOU APPROVE ALL" while `advisoryMode: false`.
