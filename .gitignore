@@ -2,3 +2,5 @@
 node_modules/
 *.prepatch
 *.bak
+autonomy.js.pre*
+server.js.pre*
