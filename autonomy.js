@@ -29,6 +29,17 @@ const TC_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
 
 // Ring buffer of recent autonomy events — exposed at /api/actions
 const recentActions = [];
+// ── SQLite persistence for action log (survives restarts) ──────────
+let _actionDb = null;
+try {
+  const Database = require('better-sqlite3');
+  _actionDb = new Database('/home/jp/alphacontrol/tc-proxy/actions.db');
+  _actionDb.exec('CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL)');
+  _actionDb.exec('CREATE INDEX IF NOT EXISTS idx_actions_id_desc ON actions(id DESC)');
+  const rows = _actionDb.prepare('SELECT data FROM actions ORDER BY id DESC LIMIT 200').all();
+  for (const r of rows) { try { recentActions.push(JSON.parse(r.data)); } catch(_){} }
+  console.log('[autonomy] loaded ' + recentActions.length + ' actions from SQLite');
+} catch(e) { console.warn('[autonomy] SQLite disabled:', e.message); }
 let lastTickAt    = null;
 let lastTickError = null;
 
@@ -42,6 +53,7 @@ const STATUS = {
 };
 
 function logEvent(entry) {
+  if (_actionDb) { try { const e2 = { ts: new Date().toISOString(), ...entry }; _actionDb.prepare('INSERT INTO actions (ts, event, data) VALUES (?, ?, ?)').run(e2.ts, e2.event, JSON.stringify(e2)); } catch(_){} }
   const e = { ts: new Date().toISOString(), ...entry };
   recentActions.unshift(e);
   if (recentActions.length > 200) recentActions.length = 200;
@@ -502,7 +514,7 @@ async function executeDecision(decision, openDealBotIds) {
       pair,
       upperPrice: upper,
       lowerPrice: lower,
-      gridQuantity: 50,
+      gridQuantity: totalQuote < 200 ? 15 : totalQuote < 500 ? 30 : 50,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
       name: 'Hannah-' + _ruleCode(decision) + '-' + asset + '-' + new Date().toISOString().slice(0,10),
@@ -563,7 +575,44 @@ async function nextDelayMs() {
 }
 
 // ── One tick ─────────────────────────────────────────────────────────
+// Conservative: only known failure signals count, so a success is never
+// mis-flagged into cooldown. A malformed/absent result counts as a failure.
+function _isFailedResult(r) {
+  if (!r || typeof r !== 'object') return true;
+  if (r.error) return true;
+  if (r.skipped) return true;
+  if (r.created === false) return true;
+  if (r.smartTradeCreated === false) return true;
+  if (r.cancelled === false) return true;
+  if (typeof r.status === 'number' && r.status >= 400) return true;
+  if (r.response && r.response.error) return true;
+  if (r.body && r.body.result && Number(r.body.result.code) < 0) return true;
+  return false;
+}
+
+function _failReason(r) {
+  if (!r || typeof r !== 'object') return 'no_result';
+  const reason =
+    r.error ||
+    (r.response && r.response.error) ||
+    (r.body && r.body.result && r.body.result.msg) ||
+    (typeof r.status === 'number' && r.status >= 400 ? 'http_' + r.status : null) ||
+    (r.skipped ? 'skipped' : null) ||
+    'unknown';
+  return String(reason).slice(0, 200);
+}
+
+let _tickInFlight = false;
+let _tickStartedAt = 0;
+const TICK_STALE_MS = 5 * 60 * 1000;
+
 async function tick() {
+  if (_tickInFlight && (Date.now() - _tickStartedAt) < TICK_STALE_MS) {
+    logEvent({ event: 'tick_skipped_inflight', inFlightMs: Date.now() - _tickStartedAt });
+    return;
+  }
+  _tickInFlight = true;
+  _tickStartedAt = Date.now();
   lastTickAt = new Date().toISOString();
   try {
     if (AUTONOMY_KILL)     { logEvent({ event: 'kill_switch_active' }); return; }
@@ -623,11 +672,19 @@ async function tick() {
         logEvent({ event: 'dry_run', decision: d });
       } else {
         const results = await executeDecision(d, openDeals);
-        // Track failures for cooldown
-        if (results?.[0]?.error || results?.[0]?.skipped || results?.[0]?.created === false) {
-          _recordFail(d);
-        }
-        logEvent({ event: 'executed', decision: d, results });
+        // Track failures for cooldown. _isFailedResult covers every shape the
+        // executors actually return; the previous predicate matched none of
+        // them, which is why the cooldown never engaged.
+        const _failedResults = Array.isArray(results) ? results.filter(_isFailedResult) : [results];
+        const _actionOk = Array.isArray(results) && results.length > 0 && _failedResults.length === 0;
+        if (!_actionOk) _recordFail(d);
+        logEvent({
+          event: _actionOk ? 'executed' : 'failed',
+          outcome: _actionOk ? 'success' : 'failure',
+          failureReason: _actionOk ? null : _failReason(_failedResults[0]),
+          decision: d,
+          results
+        });
       }
       acted++;
     }
@@ -636,6 +693,7 @@ async function tick() {
     lastTickError = String(e);
     logEvent({ event: 'tick_error', error: String(e) });
   } finally {
+    _tickInFlight = false;
     try {
       const ms = await Promise.race([
         nextDelayMs(),

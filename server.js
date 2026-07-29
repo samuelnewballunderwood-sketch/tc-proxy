@@ -1,7 +1,124 @@
 const crypto = require('crypto');
+const fs = require('fs');
 const http   = require('http');
 const PORT   = process.env.PORT || 3000;
+
+// ── Generic response cache (60s TTL by default) ─────────────────────────
+const _epCache = {};
+function _epGet(key, ttlMs) {
+  const c = _epCache[key];
+  if (c && (Date.now() - c.t) < ttlMs) return c.v;
+  return null;
+}
+function _epSet(key, v) { _epCache[key] = { t: Date.now(), v }; }
+function _epWrap(res, key) {
+  const _origEnd = res.end.bind(res);
+  res.end = function(chunk) {
+    if (res.statusCode < 400 && chunk) _epSet(key, chunk);
+    _origEnd(chunk);
+  };
+}
+
 const autonomy = require('./autonomy');
+
+// ── Account IDs (env-driven, with current defaults so existing deploys keep working) ──
+// These are 3Commas account IDs (NOT Binance keys). Override via .env if accounts change.
+const TC_SPOT_ACCOUNT_ID    = parseInt(process.env.TC_SPOT_ACCOUNT_ID    || '33438577', 10);
+const TC_FUTURES_ACCOUNT_ID = parseInt(process.env.TC_FUTURES_ACCOUNT_ID || '33439515', 10);
+// Trial 2 start: filters profit/deal aggregation to current trial period.
+// Default = April 12 2026 = Sam's Trial 2 kickoff.
+const TRIAL_START_MS = new Date(process.env.TRIAL_START_DATE || '2026-04-12T00:00:00Z').getTime();
+
+// ── 3Commas GLOBAL rate limiter (token bucket + 429/418 handling) ──────────
+// 3Commas global limit is 100 req/min across the account. We cap at 80/min (20% headroom).
+// On 429: pause bucket 60s. On 418 (IP ban): pause 24h + console alarm.
+// Monkey-patches global fetch — every call to api.3commas.io flows through here automatically.
+const _tcBucket = {
+  capacity:        parseInt(process.env.TC_BUCKET_CAPACITY || '95', 10),
+  refillIntervalMs: parseInt(process.env.TC_BUCKET_REFILL_MS || '650', 10), // 1 token / 650ms ≈ 92/min
+  tokens:          parseInt(process.env.TC_BUCKET_CAPACITY || '95', 10),
+  pausedUntil:     0,
+  bannedLogged:    false,
+  queue:           [],
+  totalAcquired:   0,
+  total429:        0,
+  total418:        0,
+  _drain() {
+    while (this.tokens > 0 && this.queue.length > 0) {
+      const resolve = this.queue.shift();
+      this.tokens--;
+      this.totalAcquired++;
+      resolve();
+    }
+  },
+  maxQueueDepth: parseInt(process.env.TC_BUCKET_MAX_QUEUE || '100', 10),
+  totalRejected:  0,
+  async acquire() {
+    if (this.pausedUntil > Date.now()) {
+      // Fast-fail during 429 backoff — caller serves cache instead of hanging
+      this.totalRejected++;
+      throw new Error('tc-bucket: paused (429 backoff), retry in ' + Math.ceil((this.pausedUntil - Date.now()) / 1000) + 's');
+    }
+    if (this.tokens > 0) {
+      this.tokens--;
+      this.totalAcquired++;
+      return;
+    }
+    // Fast-fail if queue is at cap — caller serves cache instead of waiting forever
+    if (this.queue.length >= this.maxQueueDepth) {
+      this.totalRejected++;
+      throw new Error('tc-bucket: queue full (' + this.queue.length + '/' + this.maxQueueDepth + ')');
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  },
+  handle429() {
+    this.total429++;
+    this.pausedUntil = Math.max(this.pausedUntil, Date.now() + 60_000);
+    console.warn('[tc-bucket] 429 received — pausing bucket 60s (total 429: ' + this.total429 + ')');
+  },
+  handle418(retryAfterMs) {
+    this.total418++;
+    const pauseMs = retryAfterMs || 24 * 60 * 60 * 1000;
+    this.pausedUntil = Math.max(this.pausedUntil, Date.now() + pauseMs);
+    if (!this.bannedLogged) {
+      console.error('[tc-bucket] 🚨 418 IP BAN — stopping 3Commas calls for ' + Math.round(pauseMs / 60000) + ' min');
+      this.bannedLogged = true;
+    }
+  },
+  status() {
+    return {
+      tokens: this.tokens, capacity: this.capacity, queued: this.queue.length,
+      pausedForMs: Math.max(0, this.pausedUntil - Date.now()),
+      totalAcquired: this.totalAcquired, total429: this.total429, total418: this.total418,
+    };
+  },
+};
+setInterval(() => {
+  if (_tcBucket.tokens < _tcBucket.capacity) _tcBucket.tokens++;
+  _tcBucket._drain();
+}, _tcBucket.refillIntervalMs);
+
+// Monkey-patch fetch to throttle 3Commas calls
+const _origFetch = global.fetch;
+global.fetch = async function(url, opts) {
+  const urlStr = typeof url === 'string' ? url : (url?.url || '');
+  if (urlStr.includes('api.3commas.io')) {
+    try {
+      await _tcBucket.acquire();
+    } catch (e) {
+      // Bucket throttled — return synthetic 429 response so callers can serve cache
+      return new Response(JSON.stringify({ error: true, status_code: 429, message: 'tc-proxy throttled: ' + e.message }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'x-tc-throttled': 'true' }
+      });
+    }
+    const r = await _origFetch(url, opts);
+    if (r.status === 429) _tcBucket.handle429();
+    else if (r.status === 418) _tcBucket.handle418();
+    return r;
+  }
+  return _origFetch(url, opts);
+};
 
 // ── HANNAH SYSTEM PROMPT ─────────────────────────────────────────────────
 // Updated: April 2026 — Trial 2, post-calibration, full bot registry
@@ -174,7 +291,14 @@ YOUR OWN PERFORMANCE — be honest
 You have endpoints: /api/hannah-performance (your bots: count, capital, profit) and /api/hannah-actions (persistent log of every action you took). When asked "how are you doing?" or "what have you done?", look there first. Only Hannah-named bots count as YOURS — don't claim wins from before you were autonomous.
 
 WHEN YOU CAN'T ACT — say so explicitly
-If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no Free balance, tell Sam: "Your \$X in {asset} is locked in Earn, redeem it and I'll grid it within the next tick." Never just go silent. Always explain blockers in one sentence.`;
+If R9/R12 detect idle capital but funds are locked in Binance Earn or there's no Free balance, tell Sam: "Your \$X in {asset} is locked in Earn, redeem it and I'll grid it within the next tick." Never just go silent. Always explain blockers in one sentence.
+
+ALWAYS LEAD WITH RED FLAGS — proactive self-reporting
+The system-health endpoint (/api/system-health) flags critical issues with your execution: auth failures, tick crashes, IP bans, rate-limit pressure. ALWAYS check this endpoint FIRST before answering "how are you", "everything ok", "status", or any general check-in question. If status is "critical" or "degraded", LEAD with the issue:
+
+"Sam — heads up, R17 has been failing 401 for 12 attempts in the last hour. Looks like wrong endpoint URL or API key scope. Then everything else: F&G 12, BTC..."
+
+NEVER answer "all good" without checking. NEVER hide problems. If status is "ok", proceed normally. Last night you fired R17 four hundred times into a dead endpoint and never told Sam — that can't happen again.`;
 
 
 // Last-good cache for total-capital + deals summary (in-memory)
@@ -184,14 +308,124 @@ let _lastGoodToday = null;  // today-deals cache; resets when UTC day changes
 let _lastGoodTodayDay = null;
 let _lastGoodIdle = null;     // idle-capital cache; serves last-good when 3Commas accounts race fails
 let _lastGoodMonthly = null;  // monthly-performance cache; serves last-good when deals fetch returns []
+let _lastGoodMonthlyAt = 0;   // ms timestamp of last successful monthly-performance compute
+let _lastGoodYesterday = null;// yesterday-deals cache; once computed for a date, served forever (yesterday never changes)
+
+// ── Restore caches from KV on boot so restarts don't wipe yesterday/monthly data ──
+async function _restoreCachesFromKv() {
+  try {
+    const r = await fetch('https://alphacontrol.ai/api/kv-get?key=yesterday-deals:cache');
+    if (r.ok) {
+      const j = await r.json();
+      const val = j?.value;
+      const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+      if (parsed && parsed.date) {
+        _lastGoodYesterday = parsed;
+        console.log('[boot] restored yesterday-deals cache for', parsed.date);
+      }
+    }
+  } catch (_) {}
+  try {
+    const r = await fetch('https://alphacontrol.ai/api/kv-get?key=monthly-performance:cache');
+    if (r.ok) {
+      const j = await r.json();
+      const val = j?.value;
+      const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+      if (parsed && parsed.currentMonth) {
+        _lastGoodMonthly = parsed;
+        _lastGoodMonthlyAt = Date.now();
+        console.log('[boot] restored monthly-performance cache');
+      }
+    }
+  } catch (_) {}
+}
+async function _persistYesterdayToKv(payload) {
+  try {
+    await fetch('https://alphacontrol.ai/api/kv-set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'yesterday-deals:cache', value: JSON.stringify(payload) })
+    });
+  } catch (_) {}
+}
+async function _persistMonthlyToKv(payload) {
+  try {
+    await fetch('https://alphacontrol.ai/api/kv-set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'monthly-performance:cache', value: JSON.stringify(payload) })
+    });
+  } catch (_) {}
+}
+// Fire boot restore (after 3s so listen has started)
+setTimeout(_restoreCachesFromKv, 3000);
+
+// ── Hannah self-alerts: email Sam when system-health goes critical ─────
+let _lastHealthState = 'ok';
+let _lastAlertSentAt = 0;
+const _alertCooldownMs = 15 * 60 * 1000; // 15 min between alerts for same code
+async function _checkHealthAndAlert() {
+  try {
+    const r = await fetch('http://localhost:' + (process.env.PORT || 9090) + '/api/system-health');
+    if (!r.ok) return;
+    const h = await r.json();
+    // Only alert on state TRANSITION to critical or new critical issue
+    const stateChanged = _lastHealthState !== h.status;
+    _lastHealthState = h.status;
+    if (h.status !== 'critical') return;
+    if (!stateChanged && (Date.now() - _lastAlertSentAt) < _alertCooldownMs) return;
+    _lastAlertSentAt = Date.now();
+    // Send Resend email
+    const resendKey = process.env.RESEND_API_KEY;
+    const alertEmail = process.env.ALERT_EMAIL;
+    if (!resendKey || !alertEmail) {
+      console.warn('[hannah-alert] cannot send: RESEND_API_KEY or ALERT_EMAIL missing');
+      return;
+    }
+    const subject = '🚨 Hannah Alert: ' + h.issues.map(i => i.code).join(', ');
+    const lines = [
+      'Status: ' + h.status.toUpperCase(),
+      '',
+      'Issues:',
+      ...h.issues.map(i => '• [' + i.severity + '] ' + i.code + ': ' + i.detail + (i.fix ? '\n  Fix: ' + i.fix : '')),
+      '',
+      'Stats:',
+      JSON.stringify(h.stats, null, 2),
+      '',
+      'Checked at: ' + h.checked_at,
+      'Dashboard: https://alphacontrol.ai',
+    ];
+    const text = lines.join('\n');
+    const html = '<pre style="font-family:Menlo,monospace;font-size:13px">' + text.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>';
+    await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + resendKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Hannah <hannah@alphacontrol.ai>',
+        to: [alertEmail],
+        subject, text, html,
+      }),
+    }).then(r => r.text()).then(t => console.log('[hannah-alert] sent:', t.slice(0,200)))
+      .catch(e => console.warn('[hannah-alert] send failed:', e.message));
+  } catch (e) {
+    console.warn('[hannah-alert] check failed:', e.message);
+  }
+}
+// Check health every 5 min after 2 min warm-up
+setTimeout(() => {
+  _checkHealthAndAlert();
+  setInterval(_checkHealthAndAlert, 5 * 60 * 1000);
+}, 2 * 60 * 1000);
 let _lastGoodBots = null;     // /bots cache; serves last-good when 3Commas blocks all bot fetches
+let _botsFailCache = 0;       // timestamp of last /bots failure — prevents drain loop on no cache
 // Manual override for reinvested portion of DCA locked profit.
 // Sam updates this from 3Commas UI's 'Reinvested: $XXX' display.
 // Persists in-memory + can be set via POST /api/reinvested-truth.
 let _reinvestedTruth = {
-  value: parseFloat(process.env.REINVESTED_TRUTH_USD || '396.23'),
+  // Fallback bumped from 396.23 → 647.38 (last known 3Commas truth as of 2026-06-06).
+  // Still env-driven — prefer REINVESTED_TRUTH_USD env var. This default is the last
+  // sane value if env is missing.
+  value: parseFloat(process.env.REINVESTED_TRUTH_USD || '647.38'),
   asOf: new Date().toISOString(),
-  source: 'env-default'
+  source: process.env.REINVESTED_TRUTH_USD ? 'env' : 'fallback-default'
 };
 let _lastGoodDcaDetail = null;  // /api/dca-detail cache; serves last-good when 3Commas returns non-array
 let _lastGoodActiveDeals = null;  // 3Commas active deals cache for insufficient-funds detection
@@ -248,7 +482,17 @@ let _lastGoodActiveDealsAt = 0;
 // Binance fetch cache — Render's shared IP gets rate-limited fast.
 // Per-key TTL. On '418 Too Many Requests' (IP ban), switch to a 30-minute TTL.
 const _binCache = {};            // key -> { value, expires }
-let _binBannedUntil = 0;         // ms epoch when Binance ban lifts
+// ── Persist Binance ban timestamp across restarts ────────────────────
+const _BIN_BAN_FILE = '/tmp/tc-proxy-binban.txt';
+function _loadBinBan() {
+  try { const v = parseInt(fs.readFileSync(_BIN_BAN_FILE,'utf8').trim(),10);
+    if (v && v > Date.now()) return v; } catch(_) {}
+  return 0;
+}
+function _saveBinBan(ts) {
+  try { fs.writeFileSync(_BIN_BAN_FILE, String(ts)); } catch(_) {}
+}
+let _binBannedUntil = _loadBinBan();         // ms epoch when Binance ban lifts
 async function _binCached(key, ttlMs, fetcher) {
   const now = Date.now();
   const c = _binCache[key];
@@ -265,7 +509,7 @@ async function _binCached(key, ttlMs, fetcher) {
     const isErr = v && typeof v === 'object' && (v.error || v.msg);
     if (isErr && /banned until (\d+)/.test(v.msg || v.error || '')) {
       const m = /banned until (\d+)/.exec(v.msg || v.error || '');
-      if (m) _binBannedUntil = parseInt(m[1]);
+      if (m) { _binBannedUntil = parseInt(m[1]); _saveBinBan(_binBannedUntil); }
     }
     // Only cache SUCCESSFUL responses — never overwrite last-good with an error
     if (!isErr) {
@@ -518,6 +762,24 @@ async function handleRequest(req, res) {
 
   // ── GET /bots  (3Commas — DCA + Signal + Grid combined) ────────────────────
   if (req.method === 'GET' && url === '/bots') {
+    // TTL cache: serve cached /bots for 5 min before re-fetching from 3Commas.
+    const BOTS_CACHE_TTL_MS = parseInt(process.env.BOTS_CACHE_TTL_MS || '300000', 10); // 5 min default
+    if (_lastGoodBots && _lastGoodBots._cachedAt && (Date.now() - _lastGoodBots._cachedAt) < BOTS_CACHE_TTL_MS) {
+      res.end(JSON.stringify({ ..._lastGoodBots, fromCache: true }));
+      return;
+    }
+    // NEGATIVE CACHE: if the last attempt failed, serve last-good (even if stale) for 60s
+    // before re-trying. Prevents infinite drain loop when 3Commas is rate-limiting.
+    const BOTS_NEG_CACHE_TTL_MS = parseInt(process.env.BOTS_NEG_CACHE_TTL_MS || '60000', 10);
+    if (_lastGoodBots && _lastGoodBots._lastFailedAt && (Date.now() - _lastGoodBots._lastFailedAt) < BOTS_NEG_CACHE_TTL_MS) {
+      res.end(JSON.stringify({ ..._lastGoodBots, fromCache: true, stale: true, reason: 'neg-cache' }));
+      return;
+    }
+    // If we have no cache at all and previous attempt failed, return empty fast (no fan-out)
+    if (!_lastGoodBots && _botsFailCache && (Date.now() - _botsFailCache) < BOTS_NEG_CACHE_TTL_MS) {
+      res.end(JSON.stringify({ bots: [], total: 0, dcaCount: 0, gridCount: 0, error: 'rate-limited', stale: true }));
+      return;
+    }
     try {
       async function tc3Fetch(path, qs) {
         const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
@@ -533,19 +795,24 @@ async function handleRequest(req, res) {
         return Array.isArray(data) ? data : [];
       }
 
-      // Fetch from BOTH accounts in parallel:
-      // 33438577 = Binance Spot (active DCA bots + spot grids live here)
-      // 33439515 = Binance Futures (legacy hedge bots + short grids)
-      const [dcaSpot, dcaFut, gridSpot, gridFut, dealsSpot, dealsFut, activeDealsSpot, activeDealsFut] = await Promise.all([
-        tc3Fetch('/ver1/bots',      'limit=100&account_id=33438577').catch(e => { console.warn('[/bots] dcaSpot fail:', e.message); return []; }),
-        tc3Fetch('/ver1/bots',      'limit=100&account_id=33439515').catch(e => { console.warn('[/bots] dcaFut fail:', e.message); return []; }),
-        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33438577').catch(e => { console.warn('[/bots] gridSpot fail:', e.message); return []; }),
-        tc3Fetch('/ver1/grid_bots', 'limit=100&account_id=33439515').catch(e => { console.warn('[/bots] gridFut fail:', e.message); return []; }),
-        tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33438577').catch(() => []),
-        tc3Fetch('/ver1/deals',     'limit=500&scope=completed&account_id=33439515').catch(() => []),
-        tc3Fetch('/ver1/deals',     'limit=100&scope=active&account_id=33438577').catch(() => []),
-        tc3Fetch('/ver1/deals',     'limit=100&scope=active&account_id=33439515').catch(() => []),
-      ]);
+      // ── SEQUENTIAL fetch with 250ms throttle ────────────────────────────
+      // 3Commas Expert plan caps at ~1 req/sec. 8 parallel calls = instant 429.
+      // Sequencing with 250ms stays within budget.
+      const SEQ_DELAY_MS = parseInt(process.env.TC_SEQ_DELAY_MS || '250', 10);
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      async function seq(path, qs, label) {
+        await sleep(SEQ_DELAY_MS);
+        try { return await tc3Fetch(path, qs); }
+        catch (e) { console.warn('[/bots] ' + label + ' fail:', e.message); return []; }
+      }
+      const dcaSpot          = await seq('/ver1/bots',      'limit=100&account_id=' + TC_SPOT_ACCOUNT_ID,    'dcaSpot');
+      const dcaFut           = await seq('/ver1/bots',      'limit=100&account_id=' + TC_FUTURES_ACCOUNT_ID, 'dcaFut');
+      const gridSpot         = await seq('/ver1/grid_bots', 'limit=100&account_id=' + TC_SPOT_ACCOUNT_ID,    'gridSpot');
+      const gridFut          = await seq('/ver1/grid_bots', 'limit=100&account_id=' + TC_FUTURES_ACCOUNT_ID, 'gridFut');
+      const dealsSpot        = await seq('/ver1/deals',     'limit=500&scope=completed&account_id=' + TC_SPOT_ACCOUNT_ID,    'dealsSpot');
+      const dealsFut         = await seq('/ver1/deals',     'limit=500&scope=completed&account_id=' + TC_FUTURES_ACCOUNT_ID, 'dealsFut');
+      const activeDealsSpot  = await seq('/ver1/deals',     'limit=100&scope=active&account_id=' + TC_SPOT_ACCOUNT_ID,    'activeSpot');
+      const activeDealsFut   = await seq('/ver1/deals',     'limit=100&scope=active&account_id=' + TC_FUTURES_ACCOUNT_ID, 'activeFut');
       const dcaRaw  = [...dcaSpot,  ...dcaFut];
       const gridRaw = [...gridSpot, ...gridFut];
       const dealsRaw = [...dealsSpot, ...dealsFut];
@@ -597,7 +864,7 @@ async function handleRequest(req, res) {
           direction:     b.strategy === 'short' ? 'short' : 'long',
           // marketType: Bot::MultiBot uses USDT_XXX pair format on spot account — still spot
           // Only mark futures if explicitly a perp/quarterly contract or futures account
-          marketType:    (() => { const p = (b.pairs?.[0] || b.pair || ''); return (p.includes('_PERP') || p.includes('260925') || (b.type === 'Bot::MultiBot' && b.account_id === 33439515)) ? 'futures' : 'spot'; })(),
+          marketType:    (() => { const p = (b.pairs?.[0] || b.pair || ''); return (p.includes('_PERP') || p.includes('260925') || (b.type === 'Bot::MultiBot' && b.account_id === TC_FUTURES_ACCOUNT_ID)) ? 'futures' : 'spot'; })(),
           active:        isEnabled,
         };
       });
@@ -715,19 +982,24 @@ async function handleRequest(req, res) {
       const finalDca  = bots.filter(b => b.botType === 'dca');
       const finalGrid = bots.filter(b => b.botType === 'grid');
       const payload = { bots, total: bots.length, dcaCount: finalDca.length, gridCount: finalGrid.length };
-      // Cache last-good when we actually got bots back
+      // Cache last-good when we actually got bots back; record failure timestamp otherwise
       if (bots.length > 0) {
-        _lastGoodBots = { ...payload, asOf: new Date().toISOString() };
+        _lastGoodBots = { ...payload, asOf: new Date().toISOString(), _cachedAt: Date.now() };
+        _botsFailCache = 0;  // clear failure marker
         res.end(JSON.stringify(payload));
       } else if (_lastGoodBots) {
+        _lastGoodBots._lastFailedAt = Date.now();  // mark stale-period started
         res.end(JSON.stringify({ ..._lastGoodBots, stale: true }));
       } else {
+        _botsFailCache = Date.now();  // no cache yet, mark failure
         res.end(JSON.stringify(payload));
       }
     } catch(e) {
       if (_lastGoodBots) {
+        _lastGoodBots._lastFailedAt = Date.now();
         res.end(JSON.stringify({ ..._lastGoodBots, stale: true, error: e.message }));
       } else {
+        _botsFailCache = Date.now();
         res.statusCode = 500; res.end(JSON.stringify({ error: e.message }));
       }
     }
@@ -761,6 +1033,7 @@ async function handleRequest(req, res) {
   // Debug endpoint: shows all completed deals with timestamps, grouped by bot
   // Used to verify trial-scoped vs all-time profit figures
   if (req.method === 'GET' && url === '/deals/detail') {
+    const _cdeals_detail = _epGet('deals-detail', 60000); if (_cdeals_detail) { res.end(_cdeals_detail); return; } _epWrap(res, 'deals-detail');
     try {
       function tcDealsFetch2(accountId) {
         const path = `/public/api/ver1/deals?limit=1000&scope=completed&account_id=${accountId}`;
@@ -770,8 +1043,8 @@ async function handleRequest(req, res) {
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
       const [dealsSpot, dealsFut] = await Promise.all([
-        tcDealsFetch2(33438577),
-        tcDealsFetch2(33439515),
+        tcDealsFetch2(TC_SPOT_ACCOUNT_ID),
+        tcDealsFetch2(TC_FUTURES_ACCOUNT_ID),
       ]);
       const deals = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
@@ -818,6 +1091,12 @@ async function handleRequest(req, res) {
 
 
   if (req.method === 'GET' && url === '/deals/summary') {
+    // TTL cache: 2 min on /deals/summary. This data updates slowly.
+    const DEALS_SUMMARY_TTL_MS = parseInt(process.env.DEALS_SUMMARY_TTL_MS || '120000', 10);
+    if (_lastGoodDealsSummary && _lastGoodDealsSummary._cachedAt && (Date.now() - _lastGoodDealsSummary._cachedAt) < DEALS_SUMMARY_TTL_MS) {
+      res.end(JSON.stringify({ ..._lastGoodDealsSummary, fromCache: true }));
+      return;
+    }
     try {
       await _kvHydrate();
       function tcFetch(path) {
@@ -827,9 +1106,9 @@ async function handleRequest(req, res) {
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
       const [dealsSpot, dealsFut, botsR, stRes] = await Promise.all([
-        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33438577'),
-        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=33439515'),
-        fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
+        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tcFetch('/public/api/ver1/deals?limit=1000&scope=completed&account_id=' + TC_FUTURES_ACCOUNT_ID + ''),
+        fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=' + TC_SPOT_ACCOUNT_ID + '').then(r => r.ok ? r.json() : null).catch(() => null),
         // Closed smart trades (BJ Bot $50 BTC purchases, R16/R17/R25/R30 — main pool, NOT SIGNAL/ tagged)
         tcFetch('/public/api/v2/smart_trades?status=finished&per_page=500'),
       ]);
@@ -938,7 +1217,7 @@ async function handleRequest(req, res) {
       const deals = dcaDeals;
       // Cache last-good (save when either DCA or Grid returned real data)
       if ((dcaDeals.length > 0 || gridTotalDeals > 0 || stMainPool.length > 0) && payload.totalProfit > 0) {
-        _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString() };
+        _lastGoodDealsSummary = { ...payload, asOf: new Date().toISOString(), _cachedAt: Date.now() };
         _kvSnapshot();
         res.end(JSON.stringify(payload));
       } else if (_lastGoodDealsSummary) {
@@ -964,18 +1243,57 @@ async function handleRequest(req, res) {
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const todayMs = todayUTC.getTime();
       const yesterdayMs = todayMs - 24*60*60*1000;
+      const dateStr = new Date(yesterdayMs).toISOString().slice(0, 10);
+      // Yesterday's data never changes once a UTC day is complete.
+      // Serve cache only if (a) date matches AND (b) cache has real data (not stuck zero).
+      // Stuck-zero invalidation: if cache says count=0 but the date matches "today's yesterday",
+      // re-fetch — we don't know it's REALLY zero unless we've successfully fetched after the day closed.
+      const cacheHasRealData = _lastGoodYesterday && (_lastGoodYesterday.count > 0 || _lastGoodYesterday.profit !== 0);
+      if (_lastGoodYesterday && _lastGoodYesterday.date === dateStr && cacheHasRealData) {
+        res.end(JSON.stringify({ ..._lastGoodYesterday, cached: true }));
+        return;
+      }
+      // If cache exists but is stuck-zero or wrong date, clear it (will repopulate after fetch)
+      if (_lastGoodYesterday && !cacheHasRealData) {
+        console.log('[yesterday-deals] discarding stuck-zero cache, refetching');
+        _lastGoodYesterday = null;
+      }
+      // Detect 3Commas error responses (returned as JSON object, not array)
+      const isTcError = (x) => x && typeof x === 'object' && !Array.isArray(x) && (x.error === true || x.status_code);
       function tcFetchY(path) {
         const sig = hmacSign(TC_SECRET, path);
         return fetch('https://api.3commas.io' + path, {
           headers: { 'Apikey': TC_KEY, 'Signature': sig }
         }).then(r => r.status === 204 ? [] : r.json()).catch(() => []);
       }
-      const [dealsSpot, dealsFut, finSpot, finFut] = await Promise.all([
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33438577'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=33439515'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33438577'),
-        tcFetchY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=33439515'),
-      ]);
+      // Sequence all fetches to respect 3Commas Expert plan ~1 req/sec quota
+      const SEQ_DELAY_MS = parseInt(process.env.TC_SEQ_DELAY_MS || '250', 10);
+      const seqSleep = (ms) => new Promise(r => setTimeout(r, ms));
+      async function seqY(path, label) {
+        await seqSleep(SEQ_DELAY_MS);
+        try { return await tcFetchY(path); } catch (_) { return []; }
+      }
+      const dealsSpot  = await seqY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=' + TC_SPOT_ACCOUNT_ID,    'dealsSpot');
+      const dealsFut   = await seqY('/public/api/ver1/deals?limit=200&scope=completed&order=closed_at&order_direction=desc&account_id=' + TC_FUTURES_ACCOUNT_ID, 'dealsFut');
+      const finSpot    = await seqY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=' + TC_SPOT_ACCOUNT_ID,     'finSpot');
+      const finFut     = await seqY('/public/api/ver1/deals?limit=200&scope=finished&order=closed_at&order_direction=desc&account_id=' + TC_FUTURES_ACCOUNT_ID,  'finFut');
+      // Smart trades (R17 bites etc) - finished status v2 endpoint
+      const smartTrades = await seqY('/public/api/v2/smart_trades?status=finished&per_page=200', 'smartTrades');
+      // Grid order fills — pull from cached /bots, then per-grid profits
+      const botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots').then(r => r.ok ? r.json() : null).catch(() => null);
+      const _gridBots = ((botsR && botsR.bots) || []).filter(b => b.botType === 'grid');
+      const gridProfitsArrs = [];
+      for (const b of _gridBots.slice(0, 10)) {
+        gridProfitsArrs.push(await seqY('/public/api/ver1/grid_bots/' + b.id + '/profits?limit=200', 'grid-' + b.id));
+      }
+      // If ALL deal scopes errored, bail without caching
+      const allErrored = isTcError(dealsSpot) && isTcError(dealsFut) && isTcError(finSpot) && isTcError(finFut);
+      if (allErrored) {
+        const errStr = JSON.stringify(dealsSpot).slice(0, 100);
+        res.end(JSON.stringify({ date: dateStr, count: 0, profit: 0, byBot: {}, error: '3Commas rate-limited (' + errStr + '). Retry shortly.', stale: true }));
+        return;
+      }
+      // DCA deals closed yesterday
       const pool = [
         ...(Array.isArray(dealsSpot) ? dealsSpot : []),
         ...(Array.isArray(dealsFut)  ? dealsFut  : []),
@@ -989,23 +1307,62 @@ async function handleRequest(req, res) {
         const t = new Date(d.closed_at).getTime();
         return t >= yesterdayMs && t < todayMs;
       });
-      const count = yesterdayDca.length;
-      const gross = yesterdayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
-      const reinv = yesterdayDca.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
-      const profit = gross + reinv;
+      const dcaCount  = yesterdayDca.length;
+      const dcaGross  = yesterdayDca.reduce((s, d) => s + parseFloat(d.final_profit || 0), 0);
+      const dcaReinv  = yesterdayDca.reduce((s, d) => s + parseFloat(d.reserved_quote_funds || 0), 0);
+      const dcaProfit = dcaGross + dcaReinv;
+      // Smart trades closed yesterday
+      const stItems = Array.isArray(smartTrades) ? smartTrades : (smartTrades?.items || []);
+      const yesterdayST = stItems.filter(t => {
+        const ts = t.closed_at || t.updated_at;
+        if (!ts) return false;
+        const ms = new Date(ts).getTime();
+        return ms >= yesterdayMs && ms < todayMs;
+      });
+      const stCount = yesterdayST.length;
+      const stProfit = yesterdayST.reduce((s, t) => s + parseFloat(t.profit?.usd || 0), 0);
+      // Grid order fills closed yesterday
+      let gridProfit = 0;
+      let gridFillCount = 0;
+      gridProfitsArrs.forEach(arr => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(p => {
+          const ts = p.executed_at || p.created_at || p.updated_at;
+          if (!ts) return;
+          const ms = new Date(ts).getTime();
+          if (ms < yesterdayMs || ms >= todayMs) return;
+          gridProfit += parseFloat(p.profit || p.usd_profit || 0);
+          gridFillCount++;
+        });
+      });
+      // Totals
+      const count = dcaCount + stCount + gridFillCount;
+      const profit = dcaProfit + stProfit + gridProfit;
       const byBot = {};
       for (const d of yesterdayDca) {
         const name = d.bot_name || ('DCA-' + d.bot_id);
         byBot[name] = (byBot[name] || 0) + 1;
       }
-      const dateStr = new Date(yesterdayMs).toISOString().slice(0, 10);
-      res.end(JSON.stringify({
+      const payload = {
         date: dateStr,
         count, profit: Math.round(profit * 100) / 100,
+        breakdown: {
+          dca:        { count: dcaCount, profit: Math.round(dcaProfit * 100) / 100 },
+          grid:       { count: gridFillCount, profit: Math.round(gridProfit * 100) / 100 },
+          smartTrade: { count: stCount, profit: Math.round(stProfit * 100) / 100 },
+        },
         byBot,
         windowStart: new Date(yesterdayMs).toISOString(),
         windowEnd: todayUTC.toISOString(),
-      }));
+      };
+      // Sanity: only cache if pool was substantial (>30 deals).
+      // If pool is small, fetch was probably rate-limit-partial and we'd cache a misleading zero.
+      // (Yesterday never changes once we have a real read, so we want to be SURE before caching.)
+      if (pool.length >= 30) {
+        _lastGoodYesterday = payload;
+        _persistYesterdayToKv(payload);  // survive restart
+      }
+      res.end(JSON.stringify({ ...payload, poolSize: pool.length }));
     } catch(e) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: e.message, count: 0, profit: 0 }));
@@ -1026,11 +1383,11 @@ async function handleRequest(req, res) {
       const todayUTC = new Date(); todayUTC.setUTCHours(0,0,0,0);
       const fromTs = encodeURIComponent(todayUTC.toISOString());
       const [a, b, c, d, e] = await Promise.all([
-        tc3('/public/api/ver1/deals?limit=10&scope=completed&account_id=33438577'),
-        tc3('/public/api/ver1/deals?limit=10&scope=finished&account_id=33438577'),
-        tc3('/public/api/ver1/deals?limit=10&scope=completed&from=' + fromTs + '&account_id=33438577'),
-        tc3('/public/api/ver1/deals?limit=10&scope=finished&from=' + fromTs + '&account_id=33438577'),
-        tc3('/public/api/ver1/deals?limit=500&scope=completed&account_id=33438577'),
+        tc3('/public/api/ver1/deals?limit=10&scope=completed&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tc3('/public/api/ver1/deals?limit=10&scope=finished&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tc3('/public/api/ver1/deals?limit=10&scope=completed&from=' + fromTs + '&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tc3('/public/api/ver1/deals?limit=10&scope=finished&from=' + fromTs + '&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tc3('/public/api/ver1/deals?limit=500&scope=completed&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
       ]);
       const summarize = (arr) => Array.isArray(arr)
         ? arr.slice(0, 5).map(d => ({id:d.id, bot:d.bot_name, closed_at:d.closed_at, final_profit:d.final_profit, status:d.status}))
@@ -1068,14 +1425,14 @@ async function handleRequest(req, res) {
       const cacheAge = Date.now() - _lastGoodTodaySourceAt;
       if (_lastGoodTodaySource && cacheAge < 5*60*1000) {
         ({dealsSpot, dealsFut, finishedSpot, finishedFut, smartTrades} = _lastGoodTodaySource);
-        botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null);
+        botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=' + TC_SPOT_ACCOUNT_ID + '').then(r => r.ok ? r.json() : null).catch(() => null);
       } else {
         const fetched = await Promise.all([
-          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33438577'),
-          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=33439515'),
-          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33438577'),
-          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=33439515'),
-          fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=33438577').then(r => r.ok ? r.json() : null).catch(() => null),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=completed&from=' + fromTs + '&account_id=' + TC_FUTURES_ACCOUNT_ID + ''),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+          tcFetchOne('/public/api/ver1/deals?limit=200&scope=finished&from=' + fromTs + '&account_id=' + TC_FUTURES_ACCOUNT_ID + ''),
+          fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots?account_id=' + TC_SPOT_ACCOUNT_ID + '').then(r => r.ok ? r.json() : null).catch(() => null),
           tcFetchOne('/public/api/v2/smart_trades?status=finished&per_page=100'),
         ]);
         [dealsSpot, dealsFut, finishedSpot, finishedFut, botsR, smartTrades] = fetched;
@@ -1354,7 +1711,7 @@ async function handleRequest(req, res) {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 600,
           system: systemWithContext,
           messages,
@@ -1639,6 +1996,12 @@ async function handleRequest(req, res) {
 
   // ── Monthly performance — calendar-month-accurate MTD + prev month ─
   if (req.method === 'GET' && url === '/api/monthly-performance') {
+    // TTL cache: 10 min on monthly-performance. Changes very slowly.
+    const MONTHLY_TTL_MS = parseInt(process.env.MONTHLY_TTL_MS || '600000', 10);
+    if (_lastGoodMonthly && _lastGoodMonthlyAt && (Date.now() - _lastGoodMonthlyAt) < MONTHLY_TTL_MS) {
+      res.end(JSON.stringify({ ..._lastGoodMonthly, fromCache: true }));
+      return;
+    }
     try {
       // Fetch all completed deals from 3Commas for both accounts (deals/detail already aggregates by bot, we need by-month)
       const TC_API_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
@@ -1660,8 +2023,8 @@ async function handleRequest(req, res) {
       const botsR = await fetch('http://localhost:' + (process.env.PORT || 3000) + '/bots').then(r => r.ok ? r.json() : null).catch(() => null);
       const gridBots = ((botsR && botsR.bots) || []).filter(b => b.botType === 'grid');
       const [dealsSpot, dealsFut, stRes, ...gridProfits] = await Promise.all([
-        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33438577').catch(()=>[]),
-        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=33439515').catch(()=>[]),
+        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=' + TC_SPOT_ACCOUNT_ID + '').catch(()=>[]),
+        tc3Fetch('/ver1/deals', 'limit=500&scope=completed&account_id=' + TC_FUTURES_ACCOUNT_ID + '').catch(()=>[]),
         tc3Fetch('/v2/smart_trades', 'status=finished&per_page=500').catch(()=>[]),
         // Pull per-grid profit history (one call per active grid)
         ...gridBots.slice(0, 20).map(b =>
@@ -1756,6 +2119,8 @@ async function handleRequest(req, res) {
       const realFresh = (deals.length > 0 || stItems.length > 0 || gridEvents.length > 0) && capital > 100;
       if (realFresh) {
         _lastGoodMonthly = payload;
+        _lastGoodMonthlyAt = Date.now();
+        _persistMonthlyToKv(payload);  // survive restart
         res.end(JSON.stringify(payload));
       } else if (_lastGoodMonthly) {
         res.end(JSON.stringify({ ..._lastGoodMonthly, stale: true }));
@@ -1810,6 +2175,12 @@ async function handleRequest(req, res) {
 
   // ── DCA bot detail (per-bot PnL + reinvested + ROI) ─────────────
   if (req.method === 'GET' && url === '/api/dca-detail') {
+    // TTL cache: 5 min on DCA bot detail. Bot configs change rarely.
+    const DCA_DETAIL_TTL_MS = parseInt(process.env.DCA_DETAIL_TTL_MS || '300000', 10);
+    if (_lastGoodDcaDetail && _lastGoodDcaDetail._cachedAt && (Date.now() - _lastGoodDcaDetail._cachedAt) < DCA_DETAIL_TTL_MS) {
+      res.end(JSON.stringify({ ..._lastGoodDcaDetail, fromCache: true }));
+      return;
+    }
     try {
       async function tcFetch(path, qs='') {
         const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
@@ -1822,8 +2193,8 @@ async function handleRequest(req, res) {
       // The 'limit=200' call without account_id sometimes returns an error wrapper
       // (caused 'non-array' bug) — querying each account is more reliable.
       const [bSpot, bFut] = await Promise.all([
-        tcFetch('/ver1/bots', 'limit=200&account_id=33438577'),
-        tcFetch('/ver1/bots', 'limit=200&account_id=33439515'),
+        tcFetch('/ver1/bots', 'limit=200&account_id=' + TC_SPOT_ACCOUNT_ID + ''),
+        tcFetch('/ver1/bots', 'limit=200&account_id=' + TC_FUTURES_ACCOUNT_ID + ''),
       ]);
       const dcaBots = [
         ...(Array.isArray(bSpot) ? bSpot : []),
@@ -1847,7 +2218,7 @@ async function handleRequest(req, res) {
         const reinvested = reinvestedRaw != null ? parseFloat(reinvestedRaw) : null;
         const totalLocked = reinvested != null ? pnlUsd + reinvested : pnlUsd;
         const avgDaily = finishedDeals > 0 ? pnlUsd / Math.max(1, (Date.now() - new Date(b.created_at).getTime()) / (24*60*60*1000)) : 0;
-        const exchange = b.account_id === 33439515 ? 'Binance Futures' : 'Binance Spot';
+        const exchange = b.account_id === TC_FUTURES_ACCOUNT_ID ? 'Binance Futures' : 'Binance Spot';
         return {
           id: b.id,
           name: b.name,
@@ -1893,7 +2264,7 @@ async function handleRequest(req, res) {
         summary,
         note: 'Reinvested values come from 3Commas API field reinvested_volume_usd. Currently null on most bots because 3Commas computes it server-side and does not always populate the public API field. Cash PnL (finished_deals_profit_usd) IS accurate. Reinvesting % shows how the bot is configured (100% = compounds all profit back).',
       };
-      _lastGoodDcaDetail = _payload;
+      _lastGoodDcaDetail = { ..._payload, _cachedAt: Date.now() };
       res.end(JSON.stringify(_payload));
     } catch(e) {
       if (_lastGoodDcaDetail) {
@@ -1908,6 +2279,7 @@ async function handleRequest(req, res) {
 
   // ── All-bot stats (counts every type: DCA + Grid + Signal) ──────
   if (req.method === 'GET' && url === '/api/all-bot-stats') {
+    const _call_bot_stats = _epGet('all-bot-stats', 60000); if (_call_bot_stats) { res.end(_call_bot_stats); return; } _epWrap(res, 'all-bot-stats');
     try {
       async function tcFetch(path, qs='') {
         const fullPath = '/public/api' + path + (qs ? '?' + qs : '');
@@ -2120,7 +2492,7 @@ async function handleRequest(req, res) {
       const quoteAmount = parseFloat(body.quoteAmount);    // USDT to spend
       const tpPct = parseFloat(body.takeProfitPct || 1.5);
       const slPct = parseFloat(body.stopLossPct  || 1.5);
-      const accountId = body.accountId || 33438577;
+      const accountId = body.accountId || TC_SPOT_ACCOUNT_ID;
       // ── safety caps ──
       if (!pair || !quoteAmount) {
         res.statusCode = 400;
@@ -2345,6 +2717,7 @@ async function handleRequest(req, res) {
 
   // ── Smart Trade tracker — Hannah's open + recent positions ──
   if (req.method === 'GET' && url === '/api/smart-trades') {
+    const _csmart_trades = _epGet('smart-trades', 60000); if (_csmart_trades) { res.end(_csmart_trades); return; } _epWrap(res, 'smart-trades');
     try {
       const TC_API_KEY    = process.env.TC_API_KEY    || process.env.TC_KEY    || '';
       const TC_API_SECRET = process.env.TC_API_SECRET || process.env.TC_SECRET || '';
@@ -2593,7 +2966,7 @@ async function handleRequest(req, res) {
       const body = JSON.parse(await readBody(req));
       // Required: pair, upperPrice, lowerPrice, gridQuantity, totalQuoteAmount
       // Optional: accountId (defaults to Binance Spot 33438577)
-      const accountId = body.accountId || 33438577;
+      const accountId = body.accountId || TC_SPOT_ACCOUNT_ID;
       const pair = body.pair;                      // e.g. "USDT_BTC"
       const upper = parseFloat(body.upperPrice);
       const lower = parseFloat(body.lowerPrice);
@@ -2722,8 +3095,8 @@ async function handleRequest(req, res) {
         try { return JSON.parse(raw); } catch { return []; }
       };
       const [aSpot, aFut] = await Promise.all([
-        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33438577').catch(()=>[]),
-        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33439515').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=' + TC_SPOT_ACCOUNT_ID + '').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=' + TC_FUTURES_ACCOUNT_ID + '').catch(()=>[]),
       ]);
       const all = [...(Array.isArray(aSpot)?aSpot:[]), ...(Array.isArray(aFut)?aFut:[])];
       const errCandidates = all.map(d => ({
@@ -2760,8 +3133,8 @@ async function handleRequest(req, res) {
         try { return JSON.parse(raw); } catch { return []; }
       };
       const [activeSpot, activeFut] = await Promise.all([
-        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33438577').catch(()=>[]),
-        tc3('/ver1/deals', 'limit=200&scope=active&account_id=33439515').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=' + TC_SPOT_ACCOUNT_ID + '').catch(()=>[]),
+        tc3('/ver1/deals', 'limit=200&scope=active&account_id=' + TC_FUTURES_ACCOUNT_ID + '').catch(()=>[]),
       ]);
       let activeDeals = [
         ...(Array.isArray(activeSpot) ? activeSpot : []),
@@ -2913,6 +3286,7 @@ async function handleRequest(req, res) {
 
   // ── GET /api/idle-capital — spare funds NOT deployed in any bot
   if (req.method === 'GET' && url === '/api/idle-capital') {
+    const _cidle_capital = _epGet('idle-capital', 60000); if (_cidle_capital) { res.end(_cidle_capital); return; } _epWrap(res, 'idle-capital');
     try {
       const [auditR, capR, futR, earnR] = await Promise.all([
         fetch('http://localhost:' + (process.env.PORT || 3000) + '/api/capital-audit').then(r => r.ok ? r.json() : null).catch(() => null),
@@ -2979,6 +3353,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url === '/api/signal-fund-status') {
+    const _csignal_fund_status = _epGet('signal-fund-status', 60000); if (_csignal_fund_status) { res.end(_csignal_fund_status); return; } _epWrap(res, 'signal-fund-status');
     // Lifetime P&L from Smart Trades tagged as signal (R16/R17/R25/R30 use these notes)
     try {
       const path = '/public/api/v2/smart_trades?status=finished&per_page=200';
@@ -3096,6 +3471,11 @@ async function handleRequest(req, res) {
     } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
     return;
   }
+  // ── GET /api/tc-bucket-status — observability for 3Commas rate limiter ──────
+  if (req.method === 'GET' && url === '/api/tc-bucket-status') {
+    res.end(JSON.stringify(_tcBucket.status(), null, 2));
+    return;
+  }
   if (req.method === 'GET' && url === '/api/system-health') {
     try {
       const issues = [];
@@ -3105,11 +3485,47 @@ async function handleRequest(req, res) {
       const sinceHour = now - 60*60*1000;
       const recentActs = acts.filter(a => new Date(a.ts).getTime() >= sinceHour);
       const tickErrors = recentActs.filter(a => a.event === 'tick_error').length;
+      const executedActs = recentActs.filter(a => a.event === 'executed');
       const lastExec = recentActs.find(a => a.event === 'executed');
       const lastExecMs = lastExec ? new Date(lastExec.ts).getTime() : 0;
       const minsSinceExec = lastExecMs ? Math.round((now - lastExecMs)/60000) : null;
+      // ── EXECUTION FAILURE DETECTION (the bug we just hit) ──
+      // Scan execution results for explicit auth failures (401) — could be wrong URL,
+      // missing scope, IP-blocked key, etc. THIS IS THE CRITICAL CHECK we needed last night.
+      let authFailures = 0;
+      let execSuccesses = 0;
+      let execFailures = 0;
+      executedActs.forEach(a => {
+        const resultsStr = JSON.stringify(a.results || []);
+        if (/"status_code":\s*401|"status":\s*401|access\s*denied|unauthorized/i.test(resultsStr)) {
+          authFailures++;
+        }
+        // Successful trade signals
+        if (/smartTradeCreated":\s*true|"tuned":\s*true|"created":\s*true/i.test(resultsStr)) {
+          execSuccesses++;
+        } else if (/smartTradeCreated":\s*false|"tuned":\s*false|"created":\s*false|"error":\s*"|"skipped":/i.test(resultsStr)) {
+          execFailures++;
+        }
+      });
+      if (authFailures >= 2) {
+        issues.push({
+          severity: 'critical',
+          code: 'auth_failures',
+          detail: authFailures + ' executions returned 401/access denied in last hour',
+          fix: 'Likely wrong endpoint URL, missing API scope, or IP-restricted key. Check autonomy.js endpoint URLs and 3Commas API key permissions.'
+        });
+      }
+      const totalExecs = execSuccesses + execFailures;
+      if (totalExecs >= 5 && execFailures > execSuccesses) {
+        issues.push({
+          severity: 'critical',
+          code: 'execution_failure_rate',
+          detail: execFailures + '/' + totalExecs + ' executions failed in last hour (' + Math.round(100*execFailures/totalExecs) + '%)',
+          fix: 'Hannah trying but most attempts fail. Check action log for error patterns.'
+        });
+      }
       if (tickErrors >= 3) issues.push({ severity: 'critical', code: 'autonomy_crash_loop', detail: tickErrors + ' tick errors in last hour', fix: 'Check /api/autonomy-status lastTickError' });
-      if (minsSinceExec === null || minsSinceExec > 30) issues.push({ severity: 'critical', code: 'autonomy_idle', detail: 'No successful execution in ' + (minsSinceExec || '>1h'), fix: 'Hannah may be in error state — restart Render service' });
+      if (minsSinceExec === null || minsSinceExec > 30) issues.push({ severity: 'critical', code: 'autonomy_idle', detail: 'No successful execution in ' + (minsSinceExec || '>1h'), fix: 'Hannah may be in error state — check pm2 logs.' });
       // 2) Binance ban
       const banLeft = Math.max(0, _binBannedUntil - now);
       if (banLeft > 0) issues.push({ severity: 'degraded', code: 'binance_ban', detail: Math.round(banLeft/60000) + ' min remaining', fix: 'Will auto-recover when ban window expires' });
@@ -3121,6 +3537,14 @@ async function handleRequest(req, res) {
         const ageMins = Math.round((now - new Date(_lastGoodDealsSummary.asOf).getTime())/60000);
         if (ageMins > 60) issues.push({ severity: 'degraded', code: 'stale_deals_summary', detail: '/deals/summary cache ' + ageMins + 'm old', fix: 'Awaiting fresh 3Commas response' });
       }
+      // 5) Bucket pressure — if bucket sustained queue >50, 3Commas API is being hammered
+      const bucket = _tcBucket.status();
+      if (bucket.total418 > 0) {
+        issues.push({ severity: 'critical', code: 'ip_ban_3commas', detail: bucket.total418 + ' x 418 IP bans received', fix: 'Hetzner IP banned by 3Commas. Wait for ban to clear or contact 3Commas support.' });
+      }
+      if (bucket.total429 > 50) {
+        issues.push({ severity: 'degraded', code: 'bucket_pressure', detail: 'High 429 rate from 3Commas (' + bucket.total429 + ' total)', fix: 'Demand exceeding 100/min budget. Check for runaway polling.' });
+      }
       const status = issues.find(i => i.severity === 'critical') ? 'critical'
                    : issues.find(i => i.severity === 'degraded') ? 'degraded'
                    : 'ok';
@@ -3129,10 +3553,15 @@ async function handleRequest(req, res) {
         issues,
         stats: {
           tick_errors_1h: tickErrors,
-          successful_actions_1h: recentActs.filter(a => a.event === 'executed').length,
+          successful_actions_1h: execSuccesses,
+          failed_actions_1h: execFailures,
+          auth_failures_1h: authFailures,
           mins_since_last_exec: minsSinceExec,
           binance_banned: banLeft > 0,
           binance_ban_mins_left: Math.round(banLeft/60000),
+          bucket_queued: bucket.queued,
+          bucket_total429: bucket.total429,
+          bucket_total418: bucket.total418,
         },
         checked_at: new Date(now).toISOString(),
       }));
@@ -3185,6 +3614,7 @@ async function handleRequest(req, res) {
   // 3Commas accounts have usd_amount per linked exchange. This survives Binance
   // IP bans because 3Commas API is independent.
   if (req.method === 'GET' && url === '/api/total-capital') {
+    const _ctotal_capital = _epGet('total-capital', 60000); if (_ctotal_capital) { res.end(_ctotal_capital); return; } _epWrap(res, 'total-capital');
     try {
       await _kvHydrate();
       async function tcFetch(path, qs='') {
