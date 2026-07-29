@@ -577,6 +577,10 @@ async function nextDelayMs() {
 // ── One tick ─────────────────────────────────────────────────────────
 // Conservative: only known failure signals count, so a success is never
 // mis-flagged into cooldown. A malformed/absent result counts as a failure.
+function _isSkippedResult(r) {
+  return !!(r && typeof r === 'object' && r.skipped);
+}
+
 function _isFailedResult(r) {
   if (!r || typeof r !== 'object') return true;
   if (r.error) return true;
@@ -675,13 +679,20 @@ async function tick() {
         // Track failures for cooldown. _isFailedResult covers every shape the
         // executors actually return; the previous predicate matched none of
         // them, which is why the cooldown never engaged.
-        const _failedResults = Array.isArray(results) ? results.filter(_isFailedResult) : [results];
-        const _actionOk = Array.isArray(results) && results.length > 0 && _failedResults.length === 0;
-        if (!_actionOk) _recordFail(d);
+        // Three outcomes, not two. A deliberate no-op (R31 cooldown, dedupe
+        // skip) is NOT a failure and must not trip the fail breaker.
+        const _rs = Array.isArray(results) ? results : [];
+        const _skips = _rs.filter(_isSkippedResult);
+        const _bad = _rs.filter(function (r) { return _isFailedResult(r) && !_isSkippedResult(r); });
+        const _isFail = _rs.length === 0 || _bad.length > 0;
+        const _isSkip = !_isFail && _skips.length > 0;
+        const _ok = !_isFail && !_isSkip;
+        if (_isFail) _recordFail(d);
         logEvent({
-          event: _actionOk ? 'executed' : 'failed',
-          outcome: _actionOk ? 'success' : 'failure',
-          failureReason: _actionOk ? null : _failReason(_failedResults[0]),
+          event: _ok ? 'executed' : (_isSkip ? 'skipped' : 'failed'),
+          outcome: _ok ? 'success' : (_isSkip ? 'skipped' : 'failure'),
+          failureReason: _isFail ? _failReason(_bad[0]) : null,
+          skipReason: _isSkip ? _failReason(_skips[0]) : null,
           decision: d,
           results
         });
