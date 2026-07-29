@@ -81,7 +81,11 @@ There is no feedback loop. Nothing Hannah does changes what she believes.
 
 ## The action log
 
-In-memory ring buffer, destroyed on every restart. Snapshot first if it matters:
+Persisted to SQLite (`actions.db`) via `better-sqlite3`, reloaded on boot —
+the last 200 entries survive restarts. This was silently broken until 29 Jul:
+the code was deployed but the module was never installed, so every write fell
+through the catch to the in-memory buffer. Snapshot anyway before anything
+risky:
 
     curl -s "https://tc.alphacontrol.ai/api/actions?limit=200" > ~/actions_$(date +%Y%m%d-%H%M).json
 
@@ -119,7 +123,6 @@ looks like proof orders never fired.
 ## Open
 
 - Ticks routinely exceed 90s; the watchdog, not the scheduler, drives the loop.
-- Action log does not persist — blocks outcome-based learning across restarts.
 - Sam's PORT fix (`8839f24`) is NOT in production. `autonomy.js` still hardcodes
   `localhost:9090` in `executeDecision`. Works today because the server listens
   on 9090, but setting `PORT` in `.env` would silently break execution while

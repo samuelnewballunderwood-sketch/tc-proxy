@@ -4,3 +4,4 @@ node_modules/
 *.bak
 autonomy.js.pre*
 server.js.pre*
+actions.db
