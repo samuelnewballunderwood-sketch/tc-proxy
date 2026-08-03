@@ -8,6 +8,48 @@ const PORT   = process.env.PORT || 3000;
 // on them (prices, bots, wallet, Earn positions) failed invisibly.
 const _SELF  = 'http://localhost:' + PORT;
 
+// ── R17 accumulation aggregation ──────────────────────────────────────────
+// Pure function over rows of the persisted action log. Counts only executions
+// where the Smart Trade was actually created — failed attempts and unrelated
+// rules are excluded, so the tile cannot show phantom accumulation.
+function _r17Aggregate(rows, env) {
+  const dailyCap       = parseInt(env.R17_DAILY_CAP || '10', 10);
+  const dailyBudgetUsd = parseFloat(env.R17_DAILY_BUDGET_USD || '300');
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const buys = [];
+  for (const row of rows) {
+    let e; try { e = JSON.parse(row.data); } catch (_) { continue; }
+    if (!e.decision || e.decision.objective !== 'fear_accumulate') continue;
+    const r0 = Array.isArray(e.results) ? e.results[0] : null;
+    if (!r0 || r0.smartTradeCreated !== true) continue;
+    const resp  = r0.response || {};
+    const spent = parseFloat(resp.quoteAmount != null ? resp.quoteAmount : (r0.amount || 0)) || 0;
+    const units = parseFloat(resp.units || 0) || 0;
+    if (spent <= 0) continue;
+    buys.push({ ts: row.ts, spent, units });
+  }
+  const agg = (list) => {
+    let count = 0, spentUsd = 0, units = 0;
+    for (const b of list) { count++; spentUsd += b.spent; units += b.units; }
+    return {
+      count,
+      spentUsd: +spentUsd.toFixed(2),
+      btcAccumulated: +units.toFixed(8),
+      avgBuyPrice: units > 0 ? +(spentUsd / units).toFixed(2) : 0,
+    };
+  };
+  const today = agg(buys.filter(b => String(b.ts).slice(0, 10) === todayKey));
+  const life  = agg(buys);
+  return {
+    config: { dailyCap, dailyBudgetUsd },
+    today: Object.assign({}, today, {
+      budgetUsedPct: dailyBudgetUsd > 0 ? +(100 * today.spentUsd / dailyBudgetUsd).toFixed(1) : 0,
+    }),
+    lifetime: Object.assign({}, life, { biteCount: life.count, realizedPnl: 0 }),
+    note: 'realizedPnl not tracked - R17 sells are not attributed yet',
+  };
+}
+
 // ── Generic response cache (60s TTL by default) ─────────────────────────
 const _epCache = {};
 function _epGet(key, ttlMs) {
@@ -1677,6 +1719,27 @@ async function handleRequest(req, res) {
       res.end(JSON.stringify({ fearGreed: fg, btcDominance: btcDom, fundingRate: funding, regime,
         btc24h: btc24hRes ? { change: parseFloat(btc24hRes.priceChangePercent), price: parseFloat(btc24hRes.lastPrice) } : null }));
     } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
+  // ── GET /api/r17-progress — R17 accumulation tile ──────────────
+  // Backs the dashboard tile that previously called a route that did not
+  // exist. The dashboard does `if (!r.ok) return;`, so a 404 showed zeros
+  // silently — the tile read 0.00000000 regardless of whether R17 had ever
+  // bought anything.
+  if (req.method === 'GET' && url === '/api/r17-progress') {
+    try {
+      const Database = require('better-sqlite3');
+      const _db = new Database(__dirname + '/actions.db',
+                               { readonly: true, fileMustExist: true, timeout: 3000 });
+      const _rows = _db.prepare("SELECT ts, data FROM actions WHERE event = 'executed' ORDER BY id").all();
+      _db.close();
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(_r17Aggregate(_rows, process.env)));
+    } catch (e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 
