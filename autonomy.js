@@ -602,7 +602,7 @@ function _failReason(r) {
     (r.response && r.response.error) ||
     (r.body && r.body.result && r.body.result.msg) ||
     (typeof r.status === 'number' && r.status >= 400 ? 'http_' + r.status : null) ||
-    (r.skipped ? 'skipped' : null) ||
+    (r.skipped ? (r.skipped === true ? 'skipped' : r.skipped) : null) ||
     'unknown';
   return String(reason).slice(0, 200);
 }
