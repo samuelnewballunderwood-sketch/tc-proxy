@@ -3593,7 +3593,26 @@ async function handleRequest(req, res) {
         });
       }
       if (tickErrors >= 3) issues.push({ severity: 'critical', code: 'autonomy_crash_loop', detail: tickErrors + ' tick errors in last hour', fix: 'Check /api/autonomy-status lastTickError' });
-      if (minsSinceExec === null || minsSinceExec > 30) issues.push({ severity: 'critical', code: 'autonomy_idle', detail: 'No successful execution in ' + (minsSinceExec || '>1h'), fix: 'Hannah may be in error state — check pm2 logs.' });
+      // Idle on its own is NOT a fault. Most of the time nothing clears the
+      // confidence floor, and firing critical for that trains everyone to
+      // ignore the banner — so a real stall gets dismissed with the rest.
+      // Three distinct states, three different answers:
+      const _acStatus  = (autonomy && autonomy.getStatus) ? (autonomy.getStatus() || {}) : {};
+      const _acTickMs  = _acStatus.lastTickAt ? new Date(_acStatus.lastTickAt).getTime() : 0;
+      const minsSinceTick = _acTickMs ? Math.round((now - _acTickMs)/60000) : null;
+      if (minsSinceTick === null || minsSinceTick > 25) {
+        issues.push({ severity: 'critical', code: 'autonomy_stalled',
+          detail: 'Loop has not ticked in ' + (minsSinceTick === null ? 'an unknown period' : minsSinceTick + ' min') + ' (cadence is 3-15 min)',
+          fix: 'Check pm2 list / pm2 logs on tbs-pricing. The loop itself is not running.' });
+      } else if ((minsSinceExec === null || minsSinceExec > 30) && (execFailures > 0 || tickErrors > 0)) {
+        issues.push({ severity: 'critical', code: 'autonomy_failing',
+          detail: 'No successful execution in ' + (minsSinceExec || '>1h') + ', with ' + execFailures + ' failed action(s) and ' + tickErrors + ' tick error(s) in the last hour',
+          fix: 'Loop is running but actions are not landing. Check /api/actions for failureReason.' });
+      } else if (minsSinceExec === null || minsSinceExec > 30) {
+        issues.push({ severity: 'info', code: 'autonomy_idle',
+          detail: 'No successful execution in ' + (minsSinceExec || '>1h') + ' - loop healthy, nothing clearing the confidence floor',
+          fix: 'Normal. Check /api/decisions if you expect activity: needs executable=true AND confidence >= AUTONOMY_MIN_CONFIDENCE.' });
+      }
       // 2) Binance ban
       const banLeft = Math.max(0, _binBannedUntil - now);
       if (banLeft > 0) issues.push({ severity: 'degraded', code: 'binance_ban', detail: Math.round(banLeft/60000) + ' min remaining', fix: 'Will auto-recover when ban window expires' });
