@@ -2,6 +2,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http   = require('http');
 const PORT   = process.env.PORT || 3000;
+// Self-reference for internal calls. These previously pointed at the old
+// Render deployment, which no longer exists after the Hetzner migration —
+// every call silently returned null via .catch(), so features that depended
+// on them (prices, bots, wallet, Earn positions) failed invisibly.
+const _SELF  = 'http://localhost:' + PORT;
 
 // ── Generic response cache (60s TTL by default) ─────────────────────────
 const _epCache = {};
@@ -2342,7 +2347,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/api/hannah-performance') {
     try {
       const botsR = await fetch('http://localhost:' + (process.env.PORT||3000) + '/bots').catch(()=>null);
-      const bots = botsR && botsR.ok ? await botsR.json() : (await (await fetch('https://tc-proxy-eu.onrender.com/bots')).json());
+      const bots = botsR && botsR.ok ? await botsR.json() : (await (await fetch(_SELF + '/bots')).json());
       // Show ALL bots that are active OR have realised profit. Skip pure ghosts (off + 0 profit + 0 capital).
       // Was filtering by /Hannah/i.test(name) which excluded every real DCA + grid bot Sam runs.
       const allBots = (bots.bots || []).filter(b => {
@@ -2373,7 +2378,7 @@ async function handleRequest(req, res) {
   // ── One-shot ghost bot cleanup (renames ghosts so they're obvious) ──
   if (req.method === 'POST' && url === '/api/disable-ghost-hannah-bots') {
     try {
-      const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
+      const botsR = await fetch(_SELF + '/bots');
       const bots = await botsR.json();
       const ghosts = (bots.bots || []).filter(b =>
         /Hannah/i.test(b.name||'') && !b.active && (parseFloat(b.capital)||0) === 0);
@@ -2510,7 +2515,7 @@ async function handleRequest(req, res) {
         return;
       }
       // ── Get current price for unit conversion ──
-      const prices = await fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>({}));
+      const prices = await fetch(_SELF + '/prices').then(r=>r.json()).catch(()=>({}));
       const base = pair.split('_')[1] || 'BTC';
       const price = parseFloat(prices[base+'USDT'] || prices[base] || 0);
       if (price <= 0) { res.statusCode=500; res.end(JSON.stringify({error:'cannot resolve price'})); return; }
@@ -2666,7 +2671,7 @@ async function handleRequest(req, res) {
   }
 
   // ── TradingView webhook receiver ──────────────────────────────
-  // Configure in TV → Alert → Webhook URL: https://tc-proxy-eu.onrender.com/api/tv-webhook
+  // Configure in TV → Alert → Webhook URL: https://tc.alphacontrol.ai/api/tv-webhook
   // Body (use TV alert message): JSON like {"secret":"<TV_WEBHOOK_SECRET env>","symbol":"BTCUSDT","action":"buy","strategy":"RSI_oversold","price":73000}
   if (req.method === 'POST' && url === '/api/tv-webhook') {
     try {
@@ -2792,7 +2797,7 @@ async function handleRequest(req, res) {
       });
       if (data && data.error) { res.statusCode = 503; res.end(JSON.stringify(data)); return; }
       // Annotate orders with age + base asset + estimated locked value
-      const prices = await fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>({}));
+      const prices = await fetch(_SELF + '/prices').then(r=>r.json()).catch(()=>({}));
       const annotated = (data || []).map(o => {
         const ageHours = (Date.now() - o.time) / 3600000;
         const base = o.symbol.replace(/USDT|USDC$/, '');
@@ -2885,11 +2890,11 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url === '/api/capital-audit') {
     try {
       const [spot, flex, locked, bots, prices] = await Promise.all([
-        fetch('https://tc-proxy-eu.onrender.com/spot-wallet').then(r=>r.json()).catch(()=>null),
-        fetch('https://tc-proxy-eu.onrender.com/api/binance-earn-positions').then(r=>r.json()).catch(()=>null),
-        fetch('https://tc-proxy-eu.onrender.com/api/binance-locked-earn-positions').then(r=>r.json()).catch(()=>null),
-        fetch('https://tc-proxy-eu.onrender.com/bots').then(r=>r.json()).catch(()=>null),
-        fetch('https://tc-proxy-eu.onrender.com/prices').then(r=>r.json()).catch(()=>null),
+        fetch(_SELF + '/spot-wallet').then(r=>r.json()).catch(()=>null),
+        fetch(_SELF + '/api/binance-earn-positions').then(r=>r.json()).catch(()=>null),
+        fetch(_SELF + '/api/binance-locked-earn-positions').then(r=>r.json()).catch(()=>null),
+        fetch(_SELF + '/bots').then(r=>r.json()).catch(()=>null),
+        fetch(_SELF + '/prices').then(r=>r.json()).catch(()=>null),
       ]);
       const RELEVANT = ['BTC','ETH','SOL','XRP','BNB','USDT','USDC'];
       const px = (a) => parseFloat((prices||{})[a+'USDT'] || (a === 'USDT' || a === 'USDC' ? 1 : 0));
@@ -2937,7 +2942,7 @@ async function handleRequest(req, res) {
   // ── Bulk cleanup of inactive Hannah ghost bots ────────────────────
   if (req.method === 'POST' && url === '/api/cleanup-ghost-hannah-bots') {
     try {
-      const botsR = await fetch('https://tc-proxy-eu.onrender.com/bots');
+      const botsR = await fetch(_SELF + '/bots');
       const bots = await botsR.json();
       const ghosts = (bots.bots || []).filter(b =>
         /Hannah/i.test(b.name||'') && !b.active && (parseFloat(b.capital)||0) === 0);
