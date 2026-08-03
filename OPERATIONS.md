@@ -110,21 +110,58 @@ looks like proof orders never fired.
 
 ## Fixed 29 Jul 2026
 
-1. Failure detection — predicate checked `.error`/`.skipped`/`.created`, none of
-   which executors return. `_recordFail()` never fired, cooldown never engaged,
-   retry storm hit ~130 actions/min until Binance IP-banned the box. Every
-   attempt also logged as `executed`.
-2. Tick re-entrancy — `lastTickAt` is stamped at tick start and the watchdog
-   kicks when it is >90s old, so slow ticks got concurrent twins and produced
-   duplicate actions. `tick()` is now single-flight with a 5-min escape valve.
+1. Failure detection — predicate checked `.error`/`.skipped`/`.created`, none of which
+   executors return. `_recordFail()` never fired, cooldown never engaged, retry storm hit
+   ~130 actions/min until Binance IP-banned the box. Every attempt also logged `executed`.
+2. Tick re-entrancy — `lastTickAt` is stamped at tick start and the watchdog kicked when
+   it was >90s old, so slow ticks got concurrent twins and produced duplicate actions.
+   `tick()` is now single-flight with a 5-min staleness escape valve.
 3. Skipped vs failed — deliberate no-ops were tripping the breaker.
-4. Fail-safe defaults.
+4. Fail-safe defaults — an unconfigured boot previously came up enabled, live, 8/cycle,
+   floor 50. Now disabled and dry-run.
+5. Action log persistence — the SQLite code was deployed but `better-sqlite3` was never
+   installed, so every write fell through the catch to the in-memory buffer and the log
+   died on each restart. Needed `build-essential`; no prebuilt binary for node 20 linux x64.
+6. `MAX_PER_CYCLE` — `.env` said 4, the process was running 2. Now aligned at 4.
+7. Loopback URL from `PORT` — 12 call sites in `autonomy.js` hardcoded `localhost:9090`.
+8. Watchdog threshold 90s -> 20 min. `nextDelayMs` returns a 3-15 min cadence tuned to
+   stay under Binance rate limits; the 90s watchdog overrode it and forced ~31 ticks/hour
+   in every regime, making that tuning inert since the day it was written. Very likely the
+   cause of the repeated -1003 bans.
+9. Splash claimed "ADVISORY / You Approve All" on the pre-login overlay while execution
+   ran autonomously. Now "AUTONOMOUS / Limits You Set". Lives in bjbots-dashboard.
+
+## Fixed 3 Aug 2026
+
+10. **Dead Render URLs — the big one.** 10 call sites in `server.js` still pointed at the
+    decommissioned Render host. Nearly all wrapped in `.catch(()=>null)`, so prices, bots,
+    spot-wallet and Earn positions returned empty for weeks with no error anywhere. The
+    only visible symptom was R17 spot buys failing with `cannot resolve price` (500) — the
+    price table came back empty, `parseFloat(undefined || 0)` gave 0, and the guard
+    rejected it. `/prices` on the box had been serving correct data the whole time.
+11. `skipReason` flattening — `_failReason` returned the literal `'skipped'` for any truthy
+    `r.skipped`, discarding values like `'R31 cooldown: 355m remaining'`. 151 of 200 log
+    entries affected.
+12. `/api/r17-progress` implemented. The dashboard had called it since the R17 tile
+    shipped; it never existed here. The client does `if (!r.ok) return`, so the 404 was
+    silent and the tile rendered default zeros — "lifetime BTC stack 0.00000000" was never
+    evidence either way. Now aggregates from the persisted log, counting only executions
+    where the Smart Trade was actually created.
+
+### The pattern worth remembering
+
+`.catch(()=>null)` on a data fetch turns an outage into a silent wrong answer. Ten ran
+broken for weeks. **If something looks wrong but nothing is erroring, grep for
+`.catch(()=>` before anything else.**
 
 ## Open
 
-- Ticks routinely exceed 90s; the watchdog, not the scheduler, drives the loop.
-- Sam's PORT fix (`8839f24`) is NOT in production. `autonomy.js` still hardcodes
-  `localhost:9090` in `executeDecision`. Works today because the server listens
-  on 9090, but setting `PORT` in `.env` would silently break execution while
-  the API stays up.
-- Splash says "ADVISORY — YOU APPROVE ALL" while `advisoryMode: false`.
+- **Confidence has no feedback from outcomes.** A rule scores the same after forty failures
+  as on day one. Buildable now the log records real outcomes and persists, but it needs
+  weeks of clean data first. Measurement half exists: `rule_outcomes.py`.
+- **`/api/config` serves the Simli API key to unauthenticated GET requests.** Not capital
+  risk, but a live credential in public. Rotate and move server-side.
+- `/health` still self-reports `"service":"tc-proxy-eu"` — cosmetic but misleading.
+- `realizedPnl` in `/api/r17-progress` returns 0; R17 sells are not attributed.
+- Binance API key IP allowlist is undocumented. Calls work, so presumably correct, but
+  nobody has confirmed which IP is on it.
