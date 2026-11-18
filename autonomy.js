@@ -152,10 +152,18 @@ const ALLOWLIST = [
   { actionType: 'close_grid',  objective: 'grid_recenter'    }, // R20: recenter drifted grid
   { actionType: 'spot_buy',    objective: 'liq_cascade_buy'  }, // R30: buy wick after liquidation cascade
   { actionType: 'tune_bot',    objective: 'tune_tp'           }, // R31: auto-tune DCA take-profit % per regime
+  { actionType: 'auto_transfer', objective: 'futures_to_spot' },
   { actionType: 'tune_bot',    objective: 'tune_step'         }, // R32: auto-tune DCA safety-order step % per regime
 ];
 
 // Track the last auto-grid creation to enforce daily cap
+let _lastTransferAt = 0;
+let _transferDisabledUntil = 0;
+const TRANSFER_COOLDOWN_MS = 60 * 60 * 1000;
+const TRANSFER_FAIL_DISABLE_MS = 24 * 60 * 60 * 1000;
+const TRANSFER_DAILY_CAP_USD = 3000;
+let _transferSpendUsd = 0;
+let _transferDayKey = '';
 let _lastGridCreatedAt = 0;
 const GRID_CREATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // In-flight create lock — prevents concurrent ticks from creating dupes per asset
@@ -489,7 +497,7 @@ async function executeDecision(decision, openDealBotIds) {
       const botsJ = botsR.ok ? await botsR.json() : { bots: [] };
       const hannahGrid = (botsJ.bots || []).find(b =>
         b.botType === 'grid' && /Hannah/i.test(b.name || '') &&
-        (b.pair || '').toUpperCase().includes(asset.toUpperCase()));
+        (b.pair || '').toUpperCase().includes(asset.toUpperCase()) && b.active);
       if (hannahGrid) {
         return [{ skipped: `dedupe — Hannah ${asset} grid already exists`, botId: hannahGrid.id, name: hannahGrid.name }];
       }
@@ -515,7 +523,7 @@ async function executeDecision(decision, openDealBotIds) {
       pair,
       upperPrice: upper,
       lowerPrice: lower,
-      gridQuantity: totalQuote < 200 ? 15 : totalQuote < 500 ? 30 : 50,
+      gridQuantity: totalQuote < 200 ? 15 : totalQuote < 800 ? 30 : 50,
       totalQuoteAmount: totalQuote,
       accountId: 33438577,
       name: 'Hannah-' + _ruleCode(decision) + '-' + asset + '-' + new Date().toISOString().slice(0,10),
@@ -535,7 +543,26 @@ async function executeDecision(decision, openDealBotIds) {
     return [{ created: cr.ok, status: cr.status, response: cj, spec }];
   }
 
-  const targets = Array.isArray(decision.targetBotIds) ? decision.targetBotIds : [];
+  if (decision.actionType === 'auto_transfer' && decision.objective === 'futures_to_spot') {
+    const now = Date.now();
+    if (_transferDisabledUntil > now) return [{ transferred:false, skipped:'auto_transfer disabled after prior failure', minsLeft: Math.round((_transferDisabledUntil - now)/60000) }];
+    if (now - _lastTransferAt < TRANSFER_COOLDOWN_MS) return [{ transferred:false, skipped:'cooldown', minsLeft: Math.round((TRANSFER_COOLDOWN_MS - (now - _lastTransferAt))/60000) }];
+    const day = new Date().toISOString().slice(0,10);
+    if (day !== _transferDayKey) { _transferDayKey = day; _transferSpendUsd = 0; }
+    const amount = Math.min(1500, Math.round(decision.amount || 500));
+    if (_transferSpendUsd + amount > TRANSFER_DAILY_CAP_USD) return [{ transferred:false, skipped:'daily cap', spent:_transferSpendUsd, cap:TRANSFER_DAILY_CAP_USD }];
+    try {
+      const r = await _fetchT(_LB + '/api/binance-transfer', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ type:'UMFUTURE_MAIN', asset:'USDT', amount }) }, 15000);
+      const body = await r.json();
+      if (r.ok && body.transferred) { _lastTransferAt = now; _transferSpendUsd += amount; return [{ transferred:true, amount, tranId:body.tranId }]; }
+      _transferDisabledUntil = now + TRANSFER_FAIL_DISABLE_MS;
+      return [{ transferred:false, amount, status:r.status, error:body.error||'unknown', response:body }];
+    } catch(e) {
+      _transferDisabledUntil = now + TRANSFER_FAIL_DISABLE_MS;
+      return [{ transferred:false, amount, error:e.message }];
+    }
+  }
+    const targets = Array.isArray(decision.targetBotIds) ? decision.targetBotIds : [];
   if (targets.length === 0) return [{ note: 'no targetBotIds — nothing to execute' }];
 
   if (!isAllowed(decision)) {

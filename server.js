@@ -657,6 +657,34 @@ async function handleRequest(req, res) {
   }
 
   // ── GET /spot-wallet ────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url === '/api/binance-transfer') {
+    try {
+      const raw = await readBody(req);
+      const body = raw ? JSON.parse(raw) : {};
+      const type = String(body.type || '');
+      const asset = String(body.asset || 'USDT');
+      const amount = parseFloat(body.amount);
+      if (!type || !amount || amount <= 0) { res.statusCode=400; res.end(JSON.stringify({error:'missing type/amount'})); return; }
+      if (type !== 'UMFUTURE_MAIN') { res.statusCode=400; res.end(JSON.stringify({error:'only UMFUTURE_MAIN allowed'})); return; }
+      if (amount > 1500) { res.statusCode=400; res.end(JSON.stringify({error:'amount exceeds per-tx cap $1500'})); return; }
+      try {
+        const ts0=Date.now(); const q0=`timestamp=${ts0}&recvWindow=10000`;
+        const sig0=hmacSign(BN_SECRET, q0);
+        const acctR=await fetch(`https://fapi.binance.com/fapi/v2/account?${q0}&signature=${sig0}`, {headers:{'X-MBX-APIKEY':BN_KEY}});
+        const acct=await acctR.json();
+        const wallet=parseFloat(acct?.totalWalletBalance || 0);
+        if (wallet>0 && amount > wallet*0.5) { res.statusCode=400; res.end(JSON.stringify({error:`amount > 50% of futures wallet (${wallet.toFixed(2)})`})); return; }
+      } catch(_) {}
+      const ts=Date.now(); const q=`type=${type}&asset=${asset}&amount=${amount}&timestamp=${ts}&recvWindow=10000`;
+      const sig=hmacSign(BN_SECRET, q);
+      const r=await fetch(`https://api.binance.com/sapi/v1/asset/transfer?${q}&signature=${sig}`, {method:'POST', headers:{'X-MBX-APIKEY':BN_KEY}});
+      const data=await r.json();
+      if (r.ok && data.tranId) { res.end(JSON.stringify({transferred:true, tranId:data.tranId, type, asset, amount})); }
+      else { res.statusCode=r.status>=400?r.status:500; res.end(JSON.stringify({transferred:false, error:data.msg||'transfer failed', response:data})); }
+    } catch(e) { res.statusCode=500; res.end(JSON.stringify({error:e.message})); }
+    return;
+  }
+
   if (req.method === 'GET' && url === '/spot-wallet') {
     try {
       const out = await _binCached('spot-wallet', 300_000, async () => {
