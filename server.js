@@ -1,4 +1,54 @@
 const crypto = require('crypto');
+
+// ── Security guards ───────────────────────────────────────────────────────
+// Added 18 Nov 2026. Two independent controls, both fail closed.
+//
+//   _authOk()          admin bearer token, constant-time compare.
+//                      No ADMIN_API_TOKEN configured  -> refuse.
+//   _WRITES_ALLOWED    requires AUTONOMY_KILL_SWITCH === 'false'
+//                      AND AUTONOMY_ENABLED === 'true'. Anything missing,
+//                      empty or malformed (e.g. 'TRUE', '1') -> refuse.
+//
+// Authentication is deliberately NOT tied to the kill switch: re-enabling
+// autonomy must never reopen unauthenticated financial endpoints.
+const _ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || '';
+const _WRITES_ALLOWED = process.env.AUTONOMY_KILL_SWITCH === 'false'
+                     && process.env.AUTONOMY_ENABLED     === 'true';
+
+function _authOk(req) {
+  if (!_ADMIN_TOKEN) return false;
+  const h = String(req.headers['authorization'] || '');
+  const given = h.startsWith('Bearer ')
+    ? h.slice(7)
+    : String(req.headers['x-admin-token'] || '');
+  if (!given) return false;
+  const a = crypto.createHash('sha256').update(given).digest();
+  const b = crypto.createHash('sha256').update(_ADMIN_TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+function _deny(res, code, payload) {
+  res.statusCode = code;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(payload));
+  return false;
+}
+
+// Financial writes: auth AND enabled. Returns false when the caller must stop.
+function _guardWrite(req, res, route) {
+  if (!_authOk(req)) return _deny(res, 401, { error: 'unauthorized', route });
+  if (!_WRITES_ALLOWED) return _deny(res, 423, {
+    error: 'financial_writes_disabled', route,
+    detail: 'Requires AUTONOMY_KILL_SWITCH=false and AUTONOMY_ENABLED=true',
+  });
+  return true;
+}
+
+// Control routes: auth only, so the brake still works while writes are off.
+function _guardControl(req, res, route) {
+  if (!_authOk(req)) return _deny(res, 401, { error: 'unauthorized', route });
+  return true;
+}
 const fs = require('fs');
 const http   = require('http');
 const PORT   = process.env.PORT || 3000;
@@ -658,6 +708,7 @@ async function handleRequest(req, res) {
 
   // ── GET /spot-wallet ────────────────────────────────────────────────────────
   if (req.method === 'POST' && url === '/api/binance-transfer') {
+    if (!_guardWrite(req, res, '/api/binance-transfer')) return;
     try {
       const raw = await readBody(req);
       const body = raw ? JSON.parse(raw) : {};
@@ -1083,6 +1134,7 @@ async function handleRequest(req, res) {
 
   // ── POST /bot/:id/enable|disable ────────────────────────────────────────────
   if (req.method === 'POST' && url.startsWith('/bot/')) {
+    if (!_guardWrite(req, res, '/bot/:id/:action')) return;
     try {
       const parts  = url.split('/');
       const botId  = parts[2];
@@ -1909,6 +1961,7 @@ async function handleRequest(req, res) {
   // ── POST /grid-bot/:id/disable ─────────────────────────────────────────────
   // Requires BOTS_WRITE permission on AlphaControl Final API key
   if (req.method === 'POST' && url.match(/^\/grid-bot\/\d+\/disable$/)) {
+    if (!_guardWrite(req, res, '/grid-bot/:id/disable')) return;
     try {
       const botId = url.split('/')[2];
       const path  = `/public/api/ver1/grid_bots/${botId}/disable`;
@@ -1926,6 +1979,7 @@ async function handleRequest(req, res) {
 
   // ── POST /grid-bot/:id/enable ──────────────────────────────────────────────
   if (req.method === 'POST' && url.match(/^\/grid-bot\/\d+\/enable$/)) {
+    if (!_guardWrite(req, res, '/grid-bot/:id/enable')) return;
     try {
       const botId = url.split('/')[2];
       const path  = `/public/api/ver1/grid_bots/${botId}/enable`;
@@ -2468,6 +2522,7 @@ async function handleRequest(req, res) {
 
   // ── One-shot ghost bot cleanup (renames ghosts so they're obvious) ──
   if (req.method === 'POST' && url === '/api/disable-ghost-hannah-bots') {
+    if (!_guardWrite(req, res, '/api/disable-ghost-hannah-bots')) return;
     try {
       const botsR = await fetch(_SELF + '/bots');
       const bots = await botsR.json();
@@ -2485,6 +2540,7 @@ async function handleRequest(req, res) {
 
   // ── Bulk-disable the CLAUDE.md PERMANENTLY STOPPED bot IDs ────
   if (req.method === 'POST' && url === '/api/disable-permanent-stop-bots') {
+    if (!_guardWrite(req, res, '/api/disable-permanent-stop-bots')) return;
     const STOP_LIST = [
       16801943, // BTC LONG FUTURES BOT
       16801248, // BTC HEDGE BOT
@@ -2531,6 +2587,7 @@ async function handleRequest(req, res) {
 
   // ── Binance Simple Earn: redeem flexible product ──────────────
   if (req.method === 'POST' && url === '/api/binance-redeem-earn') {
+    if (!_guardWrite(req, res, '/api/binance-redeem-earn')) return;
     try {
       if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
       const body = JSON.parse(await readBody(req));
@@ -2581,6 +2638,7 @@ async function handleRequest(req, res) {
 
   // ── Create 3Commas Smart Trade (used by R16 for TV signal trades) ──
   if (req.method === 'POST' && url === '/api/create-smart-trade') {
+    if (!_guardWrite(req, res, '/api/create-smart-trade')) return;
     try {
       const body = JSON.parse(await readBody(req));
       const pair = body.pair;                              // e.g. "USDT_BTC"
@@ -2711,6 +2769,7 @@ async function handleRequest(req, res) {
 
   // POST /api/etoro/open  — open by amount {symbol, amount, leverage=1, direction=buy}
   if (req.method === 'POST' && url === '/api/etoro/open') {
+    if (!_guardWrite(req, res, '/api/etoro/open')) return;
     try {
       if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
       const body = JSON.parse(await readBody(req));
@@ -2742,6 +2801,7 @@ async function handleRequest(req, res) {
 
   // POST /api/etoro/close — close position {positionId}
   if (req.method === 'POST' && url === '/api/etoro/close') {
+    if (!_guardWrite(req, res, '/api/etoro/close')) return;
     try {
       if (!ETORO_API_KEY || !ETORO_USER_KEY) { res.statusCode = 500; res.end(JSON.stringify({error:'eToro creds missing'})); return; }
       const body = JSON.parse(await readBody(req));
@@ -2769,8 +2829,10 @@ async function handleRequest(req, res) {
       const raw = await readBody(req);
       let alert;
       try { alert = JSON.parse(raw); } catch { alert = { raw }; }
+      // FAIL CLOSED: an unset TV_WEBHOOK_SECRET previously disabled the check
+      // entirely, leaving an unauthenticated signal-ingestion endpoint.
       const expectedSecret = process.env.TV_WEBHOOK_SECRET;
-      if (expectedSecret && alert.secret !== expectedSecret) {
+      if (!expectedSecret || alert.secret !== expectedSecret) {
         res.statusCode = 401;
         res.end(JSON.stringify({ error: 'invalid secret' }));
         return;
@@ -2921,6 +2983,7 @@ async function handleRequest(req, res) {
 
   // ── Cancel a Binance spot order ─────────────────────────────────
   if (req.method === 'POST' && url === '/api/binance-cancel-order') {
+    if (!_guardWrite(req, res, '/api/binance-cancel-order')) return;
     try {
       if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
       const body = JSON.parse(await readBody(req));
@@ -2958,6 +3021,7 @@ async function handleRequest(req, res) {
 
   // ── Binance Simple Earn LOCKED: redeem ────────────────────────
   if (req.method === 'POST' && url === '/api/binance-redeem-locked-earn') {
+    if (!_guardWrite(req, res, '/api/binance-redeem-locked-earn')) return;
     try {
       if (!BN_KEY || !BN_SECRET) { res.statusCode = 500; res.end(JSON.stringify({error:'Binance creds missing'})); return; }
       const body = JSON.parse(await readBody(req));
@@ -3014,6 +3078,7 @@ async function handleRequest(req, res) {
 
   // ── DELETE a grid bot via 3Commas ─────────────────────────────────
   if (req.method === 'POST' && url.match(/^\/api\/grid-bot\/\d+\/delete$/)) {
+    if (!_guardWrite(req, res, '/api/grid-bot/:id/delete')) return;
     try {
       const id = url.split('/')[3];
       const fullPath = `/public/api/ver1/grid_bots/${id}`;
@@ -3032,6 +3097,7 @@ async function handleRequest(req, res) {
 
   // ── Bulk cleanup of inactive Hannah ghost bots ────────────────────
   if (req.method === 'POST' && url === '/api/cleanup-ghost-hannah-bots') {
+    if (!_guardWrite(req, res, '/api/cleanup-ghost-hannah-bots')) return;
     try {
       const botsR = await fetch(_SELF + '/bots');
       const bots = await botsR.json();
@@ -3058,6 +3124,7 @@ async function handleRequest(req, res) {
 
   // ── Grid bot creation (3Commas manual grid) ─────────────────────
   if (req.method === 'POST' && url === '/api/create-grid') {
+    if (!_guardWrite(req, res, '/api/create-grid')) return;
     try {
       const body = JSON.parse(await readBody(req));
       // Required: pair, upperPrice, lowerPrice, gridQuantity, totalQuoteAmount
@@ -3516,6 +3583,7 @@ async function handleRequest(req, res) {
     return;
   }
   if (req.method === 'POST' && url === '/api/reinvested-truth') {
+    if (!_guardControl(req, res, '/api/reinvested-truth')) return;
     try {
       const body = JSON.parse(await readBody(req));
       const value = parseFloat(body.value);
@@ -3694,6 +3762,7 @@ async function handleRequest(req, res) {
     return;
   }
   if (req.method === 'POST' && url === '/api/autonomy-pause') {
+    if (!_guardControl(req, res, '/api/autonomy-pause')) return;
     try {
       const body = JSON.parse(await readBody(req));
       const mins = Math.max(1, Math.min(30, parseInt(body.minutes || 5)));
@@ -3707,11 +3776,13 @@ async function handleRequest(req, res) {
     return;
   }
   if (req.method === 'POST' && url === '/api/reset-cooldowns') {
+    if (!_guardControl(req, res, '/api/reset-cooldowns')) return;
     const before = autonomy.resetCooldowns();
     res.end(JSON.stringify({ ok: true, cleared: before }));
     return;
   }
   if (req.method === 'POST' && url === '/api/execute') {
+    if (!_guardWrite(req, res, '/api/execute')) return;
     try {
       const body = await readBody(req);
       const decision = JSON.parse(body);
@@ -3814,6 +3885,7 @@ async function handleRequest(req, res) {
   // POST /api/tune-bot {botId, takeProfitPct?, safetyOrderStepPct?}
   // Safety: TP capped 0.5-4.0%, SO step capped 1.0-6.0%, max delta per call enforced
   if (req.method === 'POST' && url === '/api/tune-bot') {
+    if (!_guardWrite(req, res, '/api/tune-bot')) return;
     try {
       const body = JSON.parse(await readBody(req));
       const botId = parseInt(body.botId);
