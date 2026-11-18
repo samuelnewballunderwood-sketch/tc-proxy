@@ -18,6 +18,49 @@ const crypto = require('crypto');
 
 const WORKER_BASE       = process.env.WORKER_BASE        || 'https://alphacontrol.ai';
 const _LB               = 'http://localhost:' + (process.env.PORT || 9090);
+
+// ── Authenticated loopback calls ──────────────────────────────────────────
+// The proxy's financial write routes require an admin bearer token. Attach it
+// ONLY to those routes, ONLY when the request target is exactly our loopback
+// origin, and never follow redirects on an authenticated request.
+const _ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || '';
+const _LB_ORIGIN = (() => { try { return new URL(_LB).origin; } catch (_) { return null; } })();
+
+// Exact-origin test. A prefix check would match http://localhost:9090.evil.com
+// and http://localhost:90901 — both different hosts. Parsing does not.
+function _isLoopbackUrl(u) {
+  if (!_LB_ORIGIN) return false;
+  try { return new URL(String(u)).origin === _LB_ORIGIN; } catch (_) { return false; }
+}
+
+// Only these paths are gated server-side, so only these receive the token.
+const _AUTH_PATHS = new Set([
+  '/api/create-smart-trade',
+  '/api/create-grid',
+  '/api/tune-bot',
+  '/api/binance-cancel-order',
+  '/api/binance-redeem-earn',
+  '/api/binance-redeem-locked-earn',
+  '/api/binance-transfer',
+  '/api/execute',
+]);
+const _AUTH_PATH_RE = /^\/(?:bot|grid-bot)\/\d+\/(?:enable|disable|delete)$/;
+function _needsAuth(pathname) {
+  return _AUTH_PATHS.has(pathname) || _AUTH_PATH_RE.test(pathname);
+}
+
+async function _lbFetch(url, opts = {}, timeoutMs) {
+  const o = { ...opts };
+  if (_ADMIN_TOKEN && _isLoopbackUrl(url)) {
+    let pathname = null;
+    try { pathname = new URL(String(url)).pathname; } catch (_) { pathname = null; }
+    if (pathname && _needsAuth(pathname)) {
+      o.headers = { ...(o.headers || {}), 'Authorization': 'Bearer ' + _ADMIN_TOKEN };
+      o.redirect = 'error';   // never replay credentials to a redirect target
+    }
+  }
+  return timeoutMs === undefined ? fetch(url, o) : _fetchT(url, o, timeoutMs);
+}
 const AUTONOMY_ENABLED  = process.env.AUTONOMY_ENABLED   === 'true';  // default OFF - must be explicitly enabled
 const AUTONOMY_DRY_RUN  = process.env.AUTONOMY_DRY_RUN   !== 'false'; // default ON - dry-run unless explicitly disabled
 const AUTONOMY_KILL     = process.env.AUTONOMY_KILL_SWITCH === 'true';
@@ -321,7 +364,7 @@ async function executeDecision(decision, openDealBotIds) {
     const slPct = isR17 ? 1.5 : isR18 ? 0.7 : isR25 ? 0.8 : isR30 ? 0.9 : 1.0;
     const strat = isR17 ? 'R17_fear_accumulate' : isR18 ? 'R18_funding_scalp' : isR25 ? 'R25_momentum_scalp' : isR30 ? 'R30_liq_hunter' : 'unknown';
     try {
-      const r = await fetch(_LB + '/api/create-smart-trade', {
+      const r = await _lbFetch(_LB + '/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pair, direction, quoteAmount: amount,
@@ -343,7 +386,7 @@ async function executeDecision(decision, openDealBotIds) {
     const guard = _r31CheckCanTune(botId);
     if (!guard.ok) return [{ skipped: 'R31 ' + guard.reason, botId }];
     try {
-      const r = await _fetchT(_LB + '/api/tune-bot', {
+      const r = await _lbFetch(_LB + '/api/tune-bot', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ botId, takeProfitPct: newTp }),
       }, 30000);
@@ -364,7 +407,7 @@ async function executeDecision(decision, openDealBotIds) {
     const guard = _r32CheckCanTune(botId);
     if (!guard.ok) return [{ skipped: 'R32 ' + guard.reason, botId }];
     try {
-      const r = await _fetchT(_LB + '/api/tune-bot', {
+      const r = await _lbFetch(_LB + '/api/tune-bot', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ botId, safetyOrderStepPct: newStep }),
       }, 30000);
@@ -383,7 +426,7 @@ async function executeDecision(decision, openDealBotIds) {
     const results = [];
     for (const id of targets) {
       try {
-        const r = await fetch(`${_LB}/grid-bot/${id}/disable`, { method: 'POST' });
+        const r = await _lbFetch(`${_LB}/grid-bot/${id}/disable`, { method: 'POST' });
         const body = await r.json();
         results.push({ botId: id, closed: r.ok, body, rule: decision.objective });
       } catch(e) { results.push({ botId: id, error: e.message }); }
@@ -398,7 +441,7 @@ async function executeDecision(decision, openDealBotIds) {
     for (const botId of botIds) {
       try {
         // First disable bot to stop new deals, then panic-sell open deal
-        const dr = await fetch(`${_LB}/bot/${botId}/disable`, { method: 'POST' });
+        const dr = await _lbFetch(`${_LB}/bot/${botId}/disable`, { method: 'POST' });
         const drBody = await dr.json().catch(()=>({}));
         // 3Commas active deal panic_sell — closes at market, releases locked USDT
         const psPath = `/public/api/ver1/bots/${botId}/panic_sell_all_deals`;
@@ -429,7 +472,7 @@ async function executeDecision(decision, openDealBotIds) {
               : null;
     if (!pair) return [{ skipped: 'unsupported symbol ' + alert.symbol }];
     try {
-      const r = await fetch(_LB + '/api/create-smart-trade', {
+      const r = await _lbFetch(_LB + '/api/create-smart-trade', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pair, direction, quoteAmount: 50, takeProfitPct: 0.8, stopLossPct: 1.0,
@@ -453,7 +496,7 @@ async function executeDecision(decision, openDealBotIds) {
     const results = [];
     for (const t of targets) {
       try {
-        const r = await fetch(_LB + '/api/binance-cancel-order', {
+        const r = await _lbFetch(_LB + '/api/binance-cancel-order', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbol: t.symbol, orderId: t.orderId }),
         });
@@ -470,7 +513,7 @@ async function executeDecision(decision, openDealBotIds) {
     const amount = parseFloat(decision.amount || 0);
     if (!amount || amount <= 0) return [{ error: 'amount missing' }];
     try {
-      const r = await fetch(_LB + '/api/binance-redeem-earn', {
+      const r = await _lbFetch(_LB + '/api/binance-redeem-earn', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ asset, amount }),
       });
@@ -493,7 +536,7 @@ async function executeDecision(decision, openDealBotIds) {
     }
     // Dedupe: skip if a Hannah grid for THIS asset already exists
     try {
-      const botsR = await fetch(_LB + '/bots');
+      const botsR = await _lbFetch(_LB + '/bots');
       const botsJ = botsR.ok ? await botsR.json() : { bots: [] };
       const hannahGrid = (botsJ.bots || []).find(b =>
         b.botType === 'grid' && /Hannah/i.test(b.name || '') &&
@@ -507,7 +550,7 @@ async function executeDecision(decision, openDealBotIds) {
     // Resolve price
     let price = 0;
     try {
-      const pr = await fetch(_LB + '/prices');
+      const pr = await _lbFetch(_LB + '/prices');
       const pj = await pr.json();
       price = parseFloat(pj[asset] || pj[asset + 'USDT'] || 0);
     } catch (_) {}
@@ -530,7 +573,7 @@ async function executeDecision(decision, openDealBotIds) {
     };
     let cr, cj;
     try {
-      cr = await fetch(_LB + '/api/create-grid', {
+      cr = await _lbFetch(_LB + '/api/create-grid', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(spec),
       });
@@ -552,7 +595,7 @@ async function executeDecision(decision, openDealBotIds) {
     const amount = Math.min(1500, Math.round(decision.amount || 500));
     if (_transferSpendUsd + amount > TRANSFER_DAILY_CAP_USD) return [{ transferred:false, skipped:'daily cap', spent:_transferSpendUsd, cap:TRANSFER_DAILY_CAP_USD }];
     try {
-      const r = await _fetchT(_LB + '/api/binance-transfer', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ type:'UMFUTURE_MAIN', asset:'USDT', amount }) }, 15000);
+      const r = await _lbFetch(_LB + '/api/binance-transfer', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ type:'UMFUTURE_MAIN', asset:'USDT', amount }) }, 15000);
       const body = await r.json();
       if (r.ok && body.transferred) { _lastTransferAt = now; _transferSpendUsd += amount; return [{ transferred:true, amount, tranId:body.tranId }]; }
       _transferDisabledUntil = now + TRANSFER_FAIL_DISABLE_MS;
@@ -667,7 +710,7 @@ async function tick() {
     try {
       const [snapR, dealsR] = await Promise.all([
         _fetchT(WORKER_BASE + '/api/daily-snapshot', {}, 10000),
-        _fetchT(_LB + '/deals/summary', {}, 10000),
+        _lbFetch(_LB + '/deals/summary', {}, 10000),
       ]);
       const snapJ = snapR.ok ? await snapR.json() : null;
       const dealsJ = dealsR.ok ? await dealsR.json() : null;
